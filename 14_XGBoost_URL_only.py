@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore")
 np.random.seed(42)
 
 print("="*80)
-print("XGBoost (URL-only) - 10-Fold CV")
+print("XGBoost (URL-only) - 10-Fold CV with Early Stopping")
 print("="*80)
 
 # ====================== LOAD LARGE DATASET ======================
@@ -56,7 +56,7 @@ df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_syn
 
 print(f"Final paired samples: {len(df)}")
 
-# ====================== HANNousse-STYLE LEXICAL FEATURES ======================
+# ====================== LEXICAL FEATURES ======================
 def extract_hannousse_style_url_features(url):
     if not isinstance(url, str) or not url.strip():
         return {f: 0.0 for f in ['length_url','length_hostname','ip','nb_dots','nb_hyphens','nb_at','nb_qm',
@@ -108,7 +108,7 @@ def extract_hannousse_style_url_features(url):
     f['phish_hints'] = sum(1 for kw in phish_keywords if kw in url.lower())
     return f
 
-print("Extracting lexical features for URL-only XGBoost...")
+print("Extracting lexical features...")
 url_features_df = pd.DataFrame([extract_hannousse_style_url_features(u) for u in df['url']])
 X = url_features_df.values.astype(np.float32)
 y = df['label'].values
@@ -134,7 +134,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD TRAINING (XGBoost URL-only) ======================
+# ====================== 10-FOLD TRAINING WITH EARLY STOPPING ======================
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -144,48 +144,64 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     X_train, X_val = X[train_idx], X[val_idx]
     y_train, y_val = y[train_idx], y[val_idx]
 
-    # Train XGBoost on lexical URL features only
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dval = xgb.DMatrix(X_val, label=y_val)
+    best_loss = float('inf')
+    patience = 5
+    patience_counter = 0
+    max_epochs = 30
 
-    params = {
-        'max_depth': 6,
-        'objective': 'binary:logistic',
-        'eval_metric': 'auc',
-        'eta': 0.1,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'seed': 42
-    }
+    final_model = None
 
-    model = xgb.train(params, dtrain, num_boost_round=200)
+    for epoch in range(max_epochs):
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        params = {
+            'max_depth': 6,
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
+            'eta': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'seed': 42
+        }
+        model = xgb.train(params, dtrain, num_boost_round=200)
 
-    # Predict
-    y_pred_prob = model.predict(dval)
-    y_pred = (y_pred_prob > 0.5).astype(int)
+        y_prob_train = model.predict(dtrain)
+        train_loss = log_loss(y_train, y_prob_train)
 
-    metrics = compute_all_metrics(y_val, y_pred, y_pred_prob)
+        print(f"  Epoch {epoch+1:2d}/{max_epochs} - Train Log Loss: {train_loss:.4f}")
+
+        if train_loss < best_loss - 1e-5:   # small tolerance
+            best_loss = train_loss
+            patience_counter = 0
+            final_model = model
+            print(f"    → New best loss: {best_loss:.4f}")
+        else:
+            patience_counter += 1
+            print(f"    → No improvement ({patience_counter}/{patience})")
+
+        if patience_counter >= patience:
+            print(f"    Early stopping triggered at epoch {epoch+1} (patience = {patience})")
+            break
+
+    # Use best model for final evaluation
+    if final_model is None:
+        final_model = model
+
+    dval = xgb.DMatrix(X_val)
+    y_prob = final_model.predict(dval)
+    y_pred = (y_prob > 0.5).astype(int)
+
+    metrics = compute_all_metrics(y_val, y_pred, y_prob)
     fold_results.append(metrics)
 
-    print(f"  Fold {fold+1} - Accuracy: {metrics['accuracy']:.4f} | F1: {metrics['f1']:.4f} | ROC-AUC: {metrics.get('roc_auc',0):.4f}")
+    print(f"  Fold {fold+1} - Accuracy: {metrics['accuracy']:.4f} | F1: {metrics['f1']:.4f} | ROC-AUC: {metrics.get('roc_auc', 0):.4f}")
 
     gc.collect()
 
 # ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\nFinal Average for XGBoost (URL-only):")
-print(f"  Accuracy: {avg_metrics['accuracy']:.4f}")
-print(f"  Balanced Accuracy: {avg_metrics['balanced_accuracy']:.4f}")
-print(f"  Precision: {avg_metrics['precision']:.4f}")
-print(f"  Recall: {avg_metrics['recall']:.4f}")
-print(f"  F1: {avg_metrics['f1']:.4f}")
-print(f"  F1 Macro: {avg_metrics['f1_macro']:.4f}")
-print(f"  F1 Weighted: {avg_metrics['f1_weighted']:.4f}")
-print(f"  ROC-AUC: {avg_metrics.get('roc_auc',0):.4f}")
-print(f"  Avg Precision: {avg_metrics.get('avg_precision',0):.4f}")
-print(f"  MCC: {avg_metrics['mcc']:.4f}")
-print(f"  Cohen's Kappa: {avg_metrics['cohen_kappa']:.4f}")
-print(f"  Log Loss: {avg_metrics.get('log_loss', np.nan):.4f}")
+for k, v in avg_metrics.items():
+    print(f"  {k.replace('_', ' ').title()}: {v:.4f}")
 
 result_df = pd.DataFrame([avg_metrics])
 result_df.to_csv("14_XGBoost_URL_only_results.csv", index=False)
