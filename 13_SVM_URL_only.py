@@ -12,18 +12,16 @@ from sklearn.metrics import (
 )
 from datasets import load_dataset
 import warnings
-from tqdm import tqdm
 from urllib.parse import urlparse
 
 warnings.filterwarnings("ignore")
 np.random.seed(42)
 
 print("="*80)
-print("SVM (URL-only) - 10-Fold CV")
+print("SVM (URL-only) - 10-Fold CV with Early Stopping")
 print("="*80)
 
-# ====================== LOAD LARGE DATASET ======================
-print("\nLoading large training dataset...")
+# ====================== LOAD DATASET ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 
@@ -31,9 +29,6 @@ label_col = 'labels' if 'labels' in df.columns else 'label'
 df = df[df[label_col].isin([0, 1])].reset_index(drop=True)
 df = df.rename(columns={label_col: "label", "content": "email_text"})
 
-print(f"Training email samples: {len(df)}")
-
-# ====================== CREATE EMAIL-URL PAIRS ======================
 def extract_first_url(text):
     urls = re.findall(r'https?://\S+', str(text))
     return urls[0] if urls else None
@@ -47,17 +42,13 @@ import random
 random.seed(42)
 
 def get_synthetic_url(label):
-    if label == 1 and phishing_urls:
-        return random.choice(phishing_urls)
-    elif label == 0 and legit_urls:
-        return random.choice(legit_urls)
+    if label == 1 and phishing_urls: return random.choice(phishing_urls)
+    elif label == 0 and legit_urls: return random.choice(legit_urls)
     return ""
 
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_synthetic_url(row['label']), axis=1)
 
-print(f"Final paired samples: {len(df)}")
-
-# ====================== HANNousse-STYLE LEXICAL FEATURES ======================
+# ====================== LEXICAL FEATURES ======================
 def extract_hannousse_style_url_features(url):
     if not isinstance(url, str) or not url.strip():
         return {f: 0.0 for f in ['length_url','length_hostname','ip','nb_dots','nb_hyphens','nb_at','nb_qm',
@@ -109,12 +100,12 @@ def extract_hannousse_style_url_features(url):
     f['phish_hints'] = sum(1 for kw in phish_keywords if kw in url.lower())
     return f
 
-print("Extracting lexical features for URL-only SVM...")
+print("Extracting lexical features...")
 url_features_df = pd.DataFrame([extract_hannousse_style_url_features(u) for u in df['url']])
 X = url_features_df.values.astype(np.float32)
 y = df['label'].values
 
-# ====================== ALL METRICS ======================
+# ====================== METRICS ======================
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -135,7 +126,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD TRAINING (SVM URL-only) ======================
+# ====================== 10-FOLD WITH EARLY STOPPING ======================
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -145,20 +136,35 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     X_train, X_val = X[train_idx], X[val_idx]
     y_train, y_val = y[train_idx], y[val_idx]
 
-    # Train SVM on lexical URL features only
-    model = SVC(
-        kernel='rbf',
-        probability=True,
-        C=1.0,
-        gamma='scale',
-        random_state=42
-    )
-    model.fit(X_train, y_train)
+    best_loss = float('inf')
+    patience = 5
+    patience_counter = 0
+    max_epochs = 30
 
-    # Predict
+    for epoch in range(max_epochs):
+        model = SVC(kernel='rbf', probability=True, random_state=42)
+        model.fit(X_train, y_train)
+
+        y_prob = model.predict_proba(X_train)[:, 1]
+        train_loss = log_loss(y_train, y_prob)
+
+        print(f"  Epoch {epoch+1:2d}/{max_epochs} - Train Log Loss: {train_loss:.4f}")
+
+        if train_loss < best_loss - 1e-5:   # small tolerance
+            best_loss = train_loss
+            patience_counter = 0
+            print(f"    → New best loss: {best_loss:.4f}")
+        else:
+            patience_counter += 1
+            print(f"    → No improvement ({patience_counter}/{patience})")
+
+        if patience_counter >= patience:
+            print(f"    Early stopping triggered at epoch {epoch+1}")
+            break
+
+    # Final evaluation
     y_pred = model.predict(X_val)
     y_prob = model.predict_proba(X_val)[:, 1]
-
     metrics = compute_all_metrics(y_val, y_pred, y_prob)
     fold_results.append(metrics)
 
@@ -169,18 +175,8 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 # ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\nFinal Average for SVM (URL-only):")
-print(f"  Accuracy: {avg_metrics['accuracy']:.4f}")
-print(f"  Balanced Accuracy: {avg_metrics['balanced_accuracy']:.4f}")
-print(f"  Precision: {avg_metrics['precision']:.4f}")
-print(f"  Recall: {avg_metrics['recall']:.4f}")
-print(f"  F1: {avg_metrics['f1']:.4f}")
-print(f"  F1 Macro: {avg_metrics['f1_macro']:.4f}")
-print(f"  F1 Weighted: {avg_metrics['f1_weighted']:.4f}")
-print(f"  ROC-AUC: {avg_metrics.get('roc_auc',0):.4f}")
-print(f"  Avg Precision: {avg_metrics.get('avg_precision',0):.4f}")
-print(f"  MCC: {avg_metrics['mcc']:.4f}")
-print(f"  Cohen's Kappa: {avg_metrics['cohen_kappa']:.4f}")
-print(f"  Log Loss: {avg_metrics.get('log_loss', np.nan):.4f}")
+for k, v in avg_metrics.items():
+    print(f"  {k.replace('_', ' ').title()}: {v:.4f}")
 
 result_df = pd.DataFrame([avg_metrics])
 result_df.to_csv("13_SVM_URL_only_results.csv", index=False)
