@@ -1,10 +1,11 @@
-# File: 22_URL_only_Ensemble_RF_DomURLBERT.py
+# File: 24_URL_only_Ensemble_Improved.py
 import pandas as pd
 import re
 import numpy as np
 import gc
 import torch
 import torch.nn as nn
+import xgboost as xgb
 from sklearn.model_selection import KFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
@@ -152,7 +153,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD ENSEMBLE (RandomForest + DomURLBERT) ======================
+# ====================== 10-FOLD IMPROVED ENSEMBLE ======================
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -164,12 +165,25 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     train_df = df.iloc[train_idx].reset_index(drop=True)
     val_df = df.iloc[val_idx].reset_index(drop=True)
 
-    # 1. RandomForest on lexical features
-    model_rf = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
+    # 1. XGBoost
+    dtrain = xgb.DMatrix(X_train_lex, label=y_train)
+    model_xgb = xgb.train({
+        'max_depth': 6,
+        'objective': 'binary:logistic',
+        'eval_metric': 'auc',
+        'eta': 0.1,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'seed': 42
+    }, dtrain, num_boost_round=200)
+    prob_xgb = model_xgb.predict(xgb.DMatrix(X_val_lex))
+
+    # 2. RandomForest
+    model_rf = RandomForestClassifier(n_estimators=400, random_state=42, n_jobs=-1)
     model_rf.fit(X_train_lex, y_train)
     prob_rf = model_rf.predict_proba(X_val_lex)[:, 1]
 
-    # 2. DomURLBERT on raw URL
+    # 3. DomURLBERT
     url_model = DomURLBERT().to(device)
     url_model.eval()
     with torch.no_grad():
@@ -177,8 +191,9 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
         url_feat = url_model(url_inputs.input_ids, url_inputs.attention_mask)
         prob_dom = url_feat.mean(dim=1).sigmoid().cpu().numpy()
 
-    # Ensemble: simple average (soft voting)
-    prob_ensemble = (prob_rf + prob_dom) / 2.0
+    # Improved weighted ensemble (give more weight to transformer)
+    prob_ensemble = (0.35 * prob_xgb) + (0.30 * prob_rf) + (0.35 * prob_dom)
+
     y_pred = (prob_ensemble > 0.5).astype(int)
 
     metrics = compute_all_metrics(y_val, y_pred, prob_ensemble)
@@ -191,10 +206,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
 # ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
-print(f"\nFinal Average for URL-only ENSEMBLE (RandomForest + DomURLBERT):")
+print(f"\nFinal Average for Improved URL-only ENSEMBLE (XGBoost + RF + DomURLBERT):")
 for k, v in avg_metrics.items():
     print(f"  {k.replace('_', ' ').title()}: {v:.4f}")
 
 result_df = pd.DataFrame([avg_metrics])
-result_df.to_csv("22_URL_only_Ensemble_RF_DomURLBERT_results.csv", index=False)
-print("\nResults saved to 22_URL_only_Ensemble_RF_DomURLBERT_results.csv")
+result_df.to_csv("24_URL_only_Ensemble_Improved_results.csv", index=False)
+print("\nResults saved to 24_URL_only_Ensemble_Improved_results.csv")
