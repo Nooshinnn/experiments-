@@ -1,4 +1,4 @@
-# File: 21_TextCNN_URL_only.py
+# File: 20_TextCNN_URL_only_Clean.py
 import pandas as pd
 import re
 import torch
@@ -25,17 +25,12 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== GPU CHECK ======================
 print("="*80)
-print("GPU STATUS CHECK")
-if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+print("TextCNN (URL-only) - Clean Label-Matched Pairing + New Early Stopping")
 print("="*80)
 
-# ====================== LOAD LARGE DATASET ======================
-print("\nLoading large training dataset...")
+# ====================== LOAD DATASET ======================
+print("\nLoading dataset...")
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 
@@ -43,31 +38,36 @@ label_col = 'labels' if 'labels' in df.columns else 'label'
 df = df[df[label_col].isin([0, 1])].reset_index(drop=True)
 df = df.rename(columns={label_col: "label", "content": "email_text"})
 
-print(f"Training email samples: {len(df)}")
+print(f"Total samples: {len(df)}")
 
-# ====================== CREATE EMAIL-URL PAIRS ======================
+# ====================== CLEAN LABEL-MATCHED PAIRING ======================
 def extract_first_url(text):
     urls = re.findall(r'https?://\S+', str(text))
     return urls[0] if urls else None
 
 df['url'] = df['email_text'].apply(extract_first_url)
 
+# Collect real URLs per class
 phishing_urls = df[df['label'] == 1]['url'].dropna().tolist()
-legit_urls = df[df['label'] == 0]['url'].dropna().tolist()
+legit_urls     = df[df['label'] == 0]['url'].dropna().tolist()
+
+print(f"Real phishing URLs: {len(phishing_urls)}")
+print(f"Real legitimate URLs: {len(legit_urls)}")
 
 import random
 random.seed(42)
 
-def get_synthetic_url(label):
+def get_matching_url(label):
     if label == 1 and phishing_urls:
         return random.choice(phishing_urls)
     elif label == 0 and legit_urls:
         return random.choice(legit_urls)
-    return ""
+    return ""  # very rare fallback
 
-df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_synthetic_url(row['label']), axis=1)
+# Assign matching URL
+df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
 
-print(f"Final paired samples: {len(df)}")
+print(f"Final samples after clean pairing: {len(df)}")
 
 # ====================== LEXICAL FEATURES ======================
 def extract_hannousse_style_url_features(url):
@@ -124,21 +124,17 @@ def extract_hannousse_style_url_features(url):
 print("Extracting lexical features...")
 url_features_df = pd.DataFrame([extract_hannousse_style_url_features(u) for u in df['url']])
 
-# ====================== TextCNN MODEL for URL ======================
+# ====================== TextCNN MODEL ======================
 class TextCNN(nn.Module):
     def __init__(self, vocab_size=30522, embed_dim=300, num_filters=100, filter_sizes=[3,4,5]):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.convs = nn.ModuleList([
-            nn.Conv1d(in_channels=embed_dim, out_channels=num_filters, kernel_size=k) 
-            for k in filter_sizes
-        ])
+        self.convs = nn.ModuleList([nn.Conv1d(embed_dim, num_filters, k) for k in filter_sizes])
         self.dropout = nn.Dropout(0.3)
         self.fc = nn.Linear(len(filter_sizes) * num_filters, 128)
         
     def forward(self, x):
-        x = self.embedding(x)                    # (batch, seq_len, embed_dim)
-        x = x.transpose(1, 2)                    # (batch, embed_dim, seq_len)
+        x = self.embedding(x).transpose(1, 2)
         x = [torch.relu(conv(x)).max(dim=2)[0] for conv in self.convs]
         x = torch.cat(x, dim=1)
         x = self.dropout(x)
@@ -146,7 +142,7 @@ class TextCNN(nn.Module):
 
 tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 
-# ====================== ALL METRICS ======================
+# ====================== METRICS ======================
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -167,7 +163,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD TRAINING WITH NEW EARLY STOPPING ======================
+# ====================== 10-FOLD WITH NEW EARLY STOPPING ======================
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -200,7 +196,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             batch = train_df.iloc[i:i+8]
             labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
 
-            # Use URL only
             url_inputs = tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
             url_feat = url_model(url_inputs.input_ids)
 
@@ -225,7 +220,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
         avg_train_loss = train_loss / (len(train_df) // 8 + 1)
 
-        # New Early Stopping Logic
         if avg_train_loss < best_loss:
             best_loss = avg_train_loss
             patience_counter = 0
@@ -235,12 +229,11 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             print(f"    → No improvement ({patience_counter}/{patience})")
 
         if patience_counter >= patience:
-            print(f"    Early stopping triggered at epoch {epoch+1} (patience = {patience})")
+            print(f"    Early stopping at epoch {epoch+1}")
             break
 
-    # ====================== EVALUATION ======================
+    # Evaluation
     url_model.eval()
-
     y_true = val_df['label'].values
     y_pred = []
     y_prob = []
@@ -248,12 +241,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     with torch.no_grad():
         for i in range(0, len(val_df), 32):
             batch = val_df.iloc[i:i+32]
-
             url_inputs = tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
             url_feat = url_model(url_inputs.input_ids)
             prob = url_feat.mean(dim=1).sigmoid().cpu().numpy()
             pred = (prob > 0.5).astype(int)
-
             y_pred.extend(pred)
             y_prob.extend(prob)
 
@@ -266,10 +257,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
 # ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
-print(f"\nFinal Average for TextCNN (URL-only):")
+print(f"\nFinal Average for TextCNN (URL-only) - Clean Label-Matched Pairing:")
 for k, v in avg_metrics.items():
     print(f"  {k.replace('_', ' ').title()}: {v:.4f}")
 
 result_df = pd.DataFrame([avg_metrics])
-result_df.to_csv("21_TextCNN_URL_only_results.csv", index=False)
-print("\nResults saved to 21_TextCNN_URL_only_results.csv")
+result_df.to_csv("20_TextCNN_URL_only_Clean.csv", index=False)
+print("\nResults saved to 20_TextCNN_URL_only_Clean.csv")
