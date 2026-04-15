@@ -44,7 +44,7 @@ df = df.rename(columns={label_col: "label", "content": "email_text"})
 
 print(f"Training email samples: {len(df)}")
 
-# ====================== TextCNN Model ======================
+# ====================== TextCNN MODEL ======================
 class TextCNN(nn.Module):
     def __init__(self, vocab_size=30522, embed_dim=300, num_filters=100, filter_sizes=[3,4,5]):
         super().__init__()
@@ -87,7 +87,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD TRAINING (TextCNN Email-only) ======================
+# ====================== 10-FOLD TRAINING WITH EARLY STOPPING ======================
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -99,18 +99,22 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
     email_model = TextCNN().to(device)
 
-    # Training (Email Agent only)
     optimizer = optim.AdamW(email_model.parameters(), lr=8e-6, weight_decay=0.08)
     criterion = nn.BCEWithLogitsLoss()
 
-    for epoch in range(20):
+    best_loss = float('inf')
+    patience = 5
+    patience_counter = 0
+    max_epochs = 30
+
+    for epoch in range(max_epochs):
         email_model.train()
 
         train_loss = 0.0
         train_correct = 0
         train_total = 0
 
-        progress_bar = tqdm(range(0, len(train_df), 8), desc=f"Epoch {epoch+1:2d}/20", leave=True)
+        progress_bar = tqdm(range(0, len(train_df), 8), desc=f"Epoch {epoch+1:2d}/{max_epochs}", leave=True)
 
         for i in progress_bar:
             batch = train_df.iloc[i:i+8]
@@ -138,8 +142,19 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
                 'Train Acc ': f'{train_correct / train_total:.4f}'
             })
 
-        if epoch >= 8 and train_loss > 0.9:
-            print(f"    Early stopping at epoch {epoch+1}")
+        avg_train_loss = train_loss / (len(train_df) // 8 + 1)
+
+        # Early Stopping Check
+        if avg_train_loss < best_loss:
+            best_loss = avg_train_loss
+            patience_counter = 0
+            print(f"    → New best loss: {best_loss:.4f}")
+        else:
+            patience_counter += 1
+            print(f"    → No improvement ({patience_counter}/{patience})")
+
+        if patience_counter >= patience:
+            print(f"    Early stopping triggered at epoch {epoch+1} (patience = {patience})")
             break
 
     # ====================== EVALUATION ======================
@@ -152,7 +167,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     with torch.no_grad():
         for i in range(0, len(val_df), 32):
             batch = val_df.iloc[i:i+32]
-            bs = len(batch)
 
             email_inputs = tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
             email_feat = email_model(email_inputs.input_ids)
@@ -172,18 +186,8 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 # ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\nFinal Average for TextCNN (Email-only):")
-print(f"  Accuracy: {avg_metrics['accuracy']:.4f}")
-print(f"  Balanced Accuracy: {avg_metrics['balanced_accuracy']:.4f}")
-print(f"  Precision: {avg_metrics['precision']:.4f}")
-print(f"  Recall: {avg_metrics['recall']:.4f}")
-print(f"  F1: {avg_metrics['f1']:.4f}")
-print(f"  F1 Macro: {avg_metrics['f1_macro']:.4f}")
-print(f"  F1 Weighted: {avg_metrics['f1_weighted']:.4f}")
-print(f"  ROC-AUC: {avg_metrics.get('roc_auc',0):.4f}")
-print(f"  Avg Precision: {avg_metrics.get('avg_precision',0):.4f}")
-print(f"  MCC: {avg_metrics['mcc']:.4f}")
-print(f"  Cohen's Kappa: {avg_metrics['cohen_kappa']:.4f}")
-print(f"  Log Loss: {avg_metrics.get('log_loss', np.nan):.4f}")
+for k, v in avg_metrics.items():
+    print(f"  {k.replace('_', ' ').title()}: {v:.4f}")
 
 result_df = pd.DataFrame([avg_metrics])
 result_df.to_csv("16_TextCNN_Email_only_results.csv", index=False)
