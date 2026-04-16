@@ -25,8 +25,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # ====================== CONFIG - CHANGE ONLY THIS ======================
-communication_name = "Simple Concat"   # <<< CHANGE THIS LINE >>>
-# Valid options:
+communication_name = "Simple Concat"   # <<< CHANGE THIS LINE ONLY >>>
+# Valid options: 
 # "No Communication", "Simple Concat", "Weighted Score", "Gated Fusion", 
 # "Cross Attention", "Message Passing"
 
@@ -176,6 +176,27 @@ comm_dict = {
 
 comm_class = comm_dict[communication_name]
 
+# ====================== METRICS FUNCTION ======================
+def compute_all_metrics(y_true, y_pred, y_prob=None):
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average='binary', zero_division=0),
+        "recall": recall_score(y_true, y_pred, average='binary', zero_division=0),
+        "f1": f1_score(y_true, y_pred, average='binary', zero_division=0),
+        "f1_macro": f1_score(y_true, y_pred, average='macro', zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average='weighted', zero_division=0),
+        "mcc": matthews_corrcoef(y_true, y_pred),
+        "cohen_kappa": cohen_kappa_score(y_true, y_pred),
+    }
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    metrics["specificity"] = tn / (tn + fp) if (tn + fp) > 0 else 0
+    if y_prob is not None:
+        metrics["roc_auc"] = roc_auc_score(y_true, y_prob)
+        metrics["avg_precision"] = average_precision_score(y_true, y_prob)
+        metrics["log_loss"] = log_loss(y_true, y_prob)
+    return metrics
+
 # ====================== TRAINING LOOP ======================
 kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 fold_results = []
@@ -222,7 +243,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             # Forward pass based on style
             if communication_name == "No Communication":
                 prob = NoCommunication.forward(e_feat, u_feat)
-                logits = prob * 2 - 1   # convert to logit
+                logits = prob * 2 - 1   # convert to logit scale for loss
             elif communication_name == "Simple Concat":
                 logits = comm_model(e_feat, u_feat)
             elif communication_name == "Weighted Score":
