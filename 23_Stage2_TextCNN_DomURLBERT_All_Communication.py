@@ -25,9 +25,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # ====================== CONFIG - CHANGE ONLY THIS ======================
-communication_name = "Simple Concat"   # <<< CHANGE THIS LINE ONLY >>>
-# Valid options: 
-# "No Communication", "Simple Concat", "Weighted Score", "Gated Fusion", 
+communication_name = "Cross Attention"   # <<< CHANGE THIS LINE ONLY >>>
+# Valid options:
+# "No Communication", "Simple Concat", "Weighted Score", "Gated Fusion",
 # "Cross Attention", "Message Passing"
 
 n_folds = 5
@@ -128,6 +128,7 @@ class GatedFusion(nn.Module):
 class CrossAttention(nn.Module):
     def __init__(self, dim=128):
         super().__init__()
+        self.dim = dim
         self.query = nn.Linear(dim, dim)
         self.key   = nn.Linear(dim, dim)
         self.value = nn.Linear(dim, dim)
@@ -136,7 +137,7 @@ class CrossAttention(nn.Module):
         Q = self.query(e)
         K = self.key(u)
         V = self.value(u)
-        attn = torch.softmax(torch.matmul(Q, K.transpose(-2,-1)) / np.sqrt(dim), dim=-1)
+        attn = torch.softmax(torch.matmul(Q, K.transpose(-2,-1)) / np.sqrt(self.dim), dim=-1)
         attended = torch.matmul(attn, V)
         comm = torch.cat([e, attended], dim=1)
         return self.fc(comm).squeeze(-1)
@@ -145,6 +146,7 @@ class MessagePassing(nn.Module):
     def __init__(self, dim=128, rounds=2):
         super().__init__()
         self.rounds = rounds
+        self.dim = dim
         self.update_e = nn.Sequential(nn.Linear(dim*2, dim), nn.ReLU(), nn.Dropout(0.3))
         self.update_u = nn.Sequential(nn.Linear(dim*2, dim), nn.ReLU(), nn.Dropout(0.3))
         self.fc = nn.Linear(dim*2, 1)
@@ -243,7 +245,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             # Forward pass based on style
             if communication_name == "No Communication":
                 prob = NoCommunication.forward(e_feat, u_feat)
-                logits = prob * 2 - 1   # convert to logit scale for loss
+                logits = prob * 2 - 1   # convert to logit scale
             elif communication_name == "Simple Concat":
                 logits = comm_model(e_feat, u_feat)
             elif communication_name == "Weighted Score":
