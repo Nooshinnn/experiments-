@@ -66,20 +66,25 @@ class MessagePassing(nn.Module):
         comm = torch.cat([e, u], dim=1)
         return self.fc(comm).squeeze(-1)
 
-# ====================== LOAD PhishNChips ======================
+# ====================== LOAD PhishNChips (Corrected) ======================
 print("\nLoading PhishNChips dataset for zero-shot test...")
-phish_df = load_dataset("AreLit/PhishNChips", split="core_emails")
-phish_df = pd.DataFrame(phish_df)
+phish_dataset = load_dataset("AreLit/PhishNChips", "emails", split="core")
+phish_df = pd.DataFrame(phish_dataset)
 
+# Rename columns to match our expected format
+phish_df = phish_df.rename(columns={
+    "email_content": "email_text",
+    "phish_label": "label"
+})
+
+# Keep only binary labels
 phish_df = phish_df[phish_df['label'].isin([0, 1])].reset_index(drop=True)
-phish_df = phish_df.rename(columns={"content": "email_text"})
 
 def extract_first_url(text):
     urls = re.findall(r'https?://\S+', str(text))
     return urls[0] if urls else None
 
-phish_df['url'] = phish_df['email_text'].apply(extract_first_url)
-phish_df = phish_df[phish_df['url'].notna()].reset_index(drop=True)
+phish_df['url'] = phish_df['url_raw']   # Use the provided url_raw column (already clean)
 
 print(f"PhishNChips samples with real URLs: {len(phish_df)}")
 
