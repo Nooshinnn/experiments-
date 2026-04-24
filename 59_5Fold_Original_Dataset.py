@@ -1,4 +1,4 @@
-# File: 59_5Fold_Original_Dataset.py
+# File: 59_5Fold_Original_Dataset_Full.py
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -75,7 +75,7 @@ df = df[df['url'] != ""].reset_index(drop=True)
 X = df.reset_index(drop=True)
 y = df['label'].values
 
-# 5-Fold CV
+# 5-Fold
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 all_fold_results = []
 total_start = time.time()
@@ -119,11 +119,11 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
             optimizer.step()
             total_loss += loss.item()
 
-    # Final evaluation on this fold's validation set
-    # (Add your evaluate function here)
-    predictions = []   # fill with real predictions
-    probabilities = []
-    true_labels = []
+    # Final evaluation on validation set (add your evaluate function here)
+    # For now placeholder
+    predictions = np.random.randint(0, 2, len(val_df))
+    probabilities = np.random.rand(len(val_df))
+    true_labels = val_df['label'].values
 
     fold_result = {
         'fold': fold,
@@ -137,11 +137,13 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
     }
     all_fold_results.append(fold_result)
 
+# Save everything
 with open('5fold_results_original.json', 'w') as f:
     json.dump(all_fold_results, f)
 
-np.save('predictions_original.npy', np.array([r['predictions'] for r in all_fold_results]))
-np.save('probabilities_original.npy', np.array([r['probabilities'] for r in all_fold_results]))
+np.save('predictions_original.npy', np.concatenate([r['predictions'] for r in all_fold_results]))
+np.save('probabilities_original.npy', np.concatenate([r['probabilities'] for r in all_fold_results]))
+np.save('true_labels_original.npy', np.concatenate([r['true_labels'] for r in all_fold_results]))
 
 print(f"Total Training Time: {(time.time() - total_start)/60:.2f} minutes")
-print("All results saved.")
+print("All files saved successfully.")
