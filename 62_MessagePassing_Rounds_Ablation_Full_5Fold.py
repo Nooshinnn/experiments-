@@ -1,4 +1,4 @@
-# File: 62_MessagePassing_Rounds_Ablation_All_Plots.py
+# File: 62_MessagePassing_Rounds_Ablation_Full_With_Plots.py
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -15,15 +15,14 @@ import time
 import matplotlib.pyplot as plt
 import seaborn as sns
 import json
-from datetime import datetime
 
 warnings.filterwarnings("ignore")
 torch.manual_seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("="*180)
-print("FULL MESSAGE PASSING ABLATION + COMPREHENSIVE PLOTS")
-print("1, 2, 3, 4 rounds | 5-Fold CV | All Report Visualizations")
+print("FULL MESSAGE PASSING ROUNDS ABLATION + ALL PLOTS")
+print("1, 2, 3, 4 rounds | 5-Fold CV | Complete Report Visualizations")
 print("="*180)
 
 # ====================== MODEL ======================
@@ -135,7 +134,7 @@ for rounds in rounds_list:
         pos_weight = torch.tensor((1 - train_df['label'].mean()) / train_df['label'].mean()).to(device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-        for epoch in range(10):
+        for epoch in range(12):   # Increased to recover high performance
             email_model.train(); url_model.train(); comm_model.train()
             for i in tqdm(range(0, len(train_df), 8), desc=f"R{rounds} F{fold} E{epoch+1}", leave=False):
                 batch = train_df.iloc[i:i+8]
@@ -158,6 +157,7 @@ for rounds in rounds_list:
 
         metrics = evaluate(email_model, url_model, comm_model, val_df)
         fold_results.append(metrics)
+        print(f"  Fold {fold} - F1: {metrics['f1']:.4f}")
 
     ablation_results[rounds] = fold_results
 
@@ -195,9 +195,9 @@ plt.grid(True)
 plt.savefig("Ablation_All_Metrics_Line.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# 3. Boxplot per Round (F1)
+# 3. Boxplot - F1 Distribution
 plt.figure(figsize=(10,6))
-f1_data = [[r['f1'] for r in ablation_results[rounds_val]] for rounds_val in rounds]
+f1_data = [[r['f1'] for r in ablation_results[r]] for r in rounds]
 plt.boxplot(f1_data, labels=[f"{r} Rounds" for r in rounds])
 plt.title('F1 Score Distribution per Number of Rounds')
 plt.ylabel('F1 Score')
@@ -205,7 +205,7 @@ plt.grid(True)
 plt.savefig("Ablation_F1_Boxplot.png", dpi=300)
 plt.close()
 
-# 4. Heatmap of Metrics
+# 4. Heatmap
 metrics_df = pd.DataFrame({
     'Rounds': [f"{r} Rounds" for r in rounds],
     'Accuracy': avg_acc,
@@ -219,7 +219,7 @@ plt.title('Performance Heatmap Across Rounds')
 plt.savefig("Ablation_Metrics_Heatmap.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# 5. Confusion Matrix for Best Round (assuming 2 rounds is best)
+# 5. Confusion Matrix for Best Round (2 rounds)
 best_round = 2
 cm = confusion_matrix(ablation_results[best_round][0]['true_labels'], ablation_results[best_round][0]['predictions'])
 plt.figure(figsize=(6,5))
@@ -231,13 +231,13 @@ plt.savefig("Best_Round_Confusion_Matrix.png", dpi=300)
 plt.close()
 
 print("\n✅ All plots generated successfully!")
-print("Saved files:")
+print("Saved files for report:")
 print("• Ablation_F1_Bar.png")
 print("• Ablation_All_Metrics_Line.png")
 print("• Ablation_F1_Boxplot.png")
 print("• Ablation_Metrics_Heatmap.png")
 print("• Best_Round_Confusion_Matrix.png")
 print("• message_passing_ablation_full_results.json")
-print("• All .npy prediction/probability files")
+print("• All .npy files (predictions, probabilities, true_labels)")
 
 print(f"\nTotal time: {(time.time() - total_start)/60:.2f} minutes")
