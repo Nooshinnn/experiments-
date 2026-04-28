@@ -1,4 +1,4 @@
-# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_With_Plots_And_Timing.py
+# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_With_Plots_ValEarlyStopping.py
 import pandas as pd
 import re
 import torch
@@ -6,12 +6,13 @@ import torch.nn as nn
 import torch.optim as optim
 import gc
 import numpy as np
-import time  # ← Added for timing
+import time
 from sklearn.model_selection import KFold
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, confusion_matrix, matthews_corrcoef,
-    balanced_accuracy_score, cohen_kappa_score, average_precision_score, log_loss
+    balanced_accuracy_score, cohen_kappa_score, average_precision_score, log_loss,
+    roc_curve, precision_recall_curve, classification_report
 )
 from transformers import AutoTokenizer, AutoModel
 from datasets import load_dataset
@@ -188,13 +189,16 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== TRAINING LOOP ======================
+# ====================== TRAINING LOOP (Validation Loss Early Stopping + Timing) ======================
 kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 fold_results = []
-fold_times = []          # ← Added to store time per fold
+fold_times = []
+all_y_true = []
+all_y_pred = []
+all_y_prob = []
 
 for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
-    fold_start = time.time()                     # ← Start timing
+    fold_start = time.time()
     print(f"\n--- Fold {fold+1}/{n_folds} ---")
     train_df = df.iloc[train_idx].reset_index(drop=True)
     val_df = df.iloc[val_idx].reset_index(drop=True)
@@ -210,10 +214,11 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     optimizer = optim.AdamW(params, lr=8e-6, weight_decay=0.08)
     criterion = nn.BCEWithLogitsLoss()
 
-    best_loss = float('inf')
+    best_val_loss = float('inf')
     patience_counter = 0
 
     for epoch in range(max_epochs):
+        # Training
         email_model.train()
         url_model.train()
         if comm_model: comm_model.train()
@@ -247,15 +252,45 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             train_loss += loss.item()
             progress_bar.set_postfix({'Train Loss': f'{train_loss / (i//batch_size + 1):.4f}'})
 
-        avg_train_loss = train_loss / (len(train_df) // batch_size + 1)
-        if avg_train_loss < best_loss:
-            best_loss = avg_train_loss
+        # Validation Loss for Early Stopping
+        email_model.eval()
+        url_model.eval()
+        if comm_model: comm_model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for i in range(0, len(val_df), batch_size):
+                batch = val_df.iloc[i:i+batch_size]
+                labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+                e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+                u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+                e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+                u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+
+                if communication_name == "No Communication":
+                    prob = NoCommunication.forward(e_feat, u_feat)
+                    logits = prob * 2 - 1
+                elif communication_name == "Simple Concat":
+                    logits = comm_model(e_feat, u_feat)
+                elif communication_name == "Weighted Score":
+                    e_score = torch.sigmoid(torch.mean(e_feat, dim=1))
+                    u_score = torch.sigmoid(torch.mean(u_feat, dim=1))
+                    logits = comm_model(e_score, u_score)
+                else:
+                    logits = comm_model(e_feat, u_feat)
+
+                loss = criterion(logits, labels)
+                val_loss += loss.item()
+
+        avg_val_loss = val_loss / (len(val_df) // batch_size + 1)
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             patience_counter = 0
         else:
             patience_counter += 1
-        if patience_counter >= patience:
-            print(f" Early stopping at epoch {epoch+1}")
-            break
+            if patience_counter >= patience:
+                print(f" Early stopping at epoch {epoch+1} (Validation Loss)")
+                break
 
     # ====================== EVALUATION ======================
     email_model.eval()
@@ -292,9 +327,13 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     metrics = compute_all_metrics(y_true, y_pred, y_prob)
     fold_results.append(metrics)
 
-    fold_time = time.time() - fold_start          # ← End timing
+    fold_time = time.time() - fold_start
     fold_times.append(fold_time)
     print(f"  Fold {fold+1} completed in {fold_time/60:.2f} minutes")
+
+    all_y_true.extend(y_true)
+    all_y_pred.extend(y_pred)
+    all_y_prob.extend(y_prob)
 
     del email_model, url_model
     if comm_model: del comm_model
@@ -307,7 +346,6 @@ print(f"\n=== {communication_name} Final Results ({n_folds}-fold) ===")
 for k, v in avg_metrics.items():
     print(f" {k.replace('_', ' ').title()}: {v:.4f}")
 
-# Print fold times
 print("\n=== Fold Execution Times ===")
 for i, t in enumerate(fold_times, 1):
     print(f"  Fold {i}: {t/60:.2f} minutes")
@@ -315,8 +353,74 @@ for i, t in enumerate(fold_times, 1):
 result_df = pd.DataFrame([avg_metrics])
 result_df.to_csv(f"Stage2_DistilBERT_Email_DomURLBERT_{communication_name.replace(' ', '_')}_results.csv", index=False)
 
-# ====================== PLOTS ======================
-all_y_true = np.array([item for sublist in [f['true_labels'] if 'true_labels' in f else [] for f in fold_results] for item in sublist])  # placeholder if needed
-# (Add your preferred plots here if you want - currently keeping minimal to preserve structure)
+# ====================== GENERATE ALL PLOTS ======================
+all_y_true = np.array(all_y_true)
+all_y_pred = np.array(all_y_pred)
+all_y_prob = np.array(all_y_prob)
 
-print(f"\nResults saved to Stage2_DistilBERT_Email_DomURLBERT_{communication_name.replace(' ', '_')}_results.csv")
+# 1. ROC Curve
+fpr, tpr, _ = roc_curve(all_y_true, all_y_prob)
+plt.figure(figsize=(8,6))
+plt.plot(fpr, tpr, label=f'ROC AUC = {roc_auc_score(all_y_true, all_y_prob):.4f}')
+plt.plot([0,1],[0,1], '--')
+plt.title('ROC Curve')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.legend()
+plt.grid()
+plt.savefig("ROC_Curve.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+# 2. Precision-Recall Curve
+prec, rec, _ = precision_recall_curve(all_y_true, all_y_prob)
+plt.figure(figsize=(8,6))
+plt.plot(rec, prec, label=f'AP = {average_precision_score(all_y_true, all_y_prob):.4f}')
+plt.title('Precision-Recall Curve')
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.legend()
+plt.grid()
+plt.savefig("Precision_Recall_Curve.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+# 3. Per-class Precision & Recall
+per_class_prec = precision_score(all_y_true, all_y_pred, average=None)
+per_class_rec = recall_score(all_y_true, all_y_pred, average=None)
+x = np.arange(2)
+plt.figure(figsize=(8,6))
+plt.bar(x - 0.2, per_class_prec, 0.4, label='Precision')
+plt.bar(x + 0.2, per_class_rec, 0.4, label='Recall')
+plt.xticks(x, ['Legitimate (0)', 'Phishing (1)'])
+plt.title('Per-class Precision and Recall')
+plt.ylabel('Score')
+plt.legend()
+plt.savefig("PerClass_Precision_Recall.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+# 4. Confusion Matrix
+cm = confusion_matrix(all_y_true, all_y_pred)
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=['Legitimate', 'Phishing'], 
+            yticklabels=['Legitimate', 'Phishing'])
+plt.title('Confusion Matrix')
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
+plt.savefig("Confusion_Matrix.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+# 5. Classification Report
+report = classification_report(all_y_true, all_y_pred, target_names=['Legitimate (0)', 'Phishing (1)'], output_dict=True)
+report_df = pd.DataFrame(report).transpose().round(4)
+fig, ax = plt.subplots(figsize=(10,6))
+ax.axis('off')
+table = ax.table(cellText=report_df.values, colLabels=report_df.columns, rowLabels=report_df.index, loc='center', cellLoc='center')
+plt.title('Classification Report')
+plt.savefig("Classification_Report.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+print("\n✅ All plots generated successfully!")
+print("Saved files:")
+for f in ["ROC_Curve.png", "Precision_Recall_Curve.png", "PerClass_Precision_Recall.png", 
+          "Confusion_Matrix.png", "Classification_Report.png"]:
+    print(f"   • {f}")
