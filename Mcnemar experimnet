@@ -1,4 +1,4 @@
-# File: Experiment3_McNemar_MessagePassing_vs_SimpleConcat_Full.py
+# File: Experiment3_McNemar_BothModels_OneGo.py
 import pandas as pd
 import re
 import torch
@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.optim as optim
 import gc
 import numpy as np
-from sklearn.model_selection import KFold
 from sklearn.metrics import confusion_matrix
 from transformers import AutoTokenizer, AutoModel
 from datasets import load_dataset
@@ -22,10 +21,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("="*80)
 print("EXPERIMENT 3: McNemar's Test")
-print("Message Passing (2 rounds) vs Simple Concat")
+print("Message Passing (2 rounds) vs Simple Concat - One Fold")
 print("="*80)
 
-# ====================== DATASET & CLEAN PAIRING ======================
+# ====================== LOAD DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -42,13 +41,16 @@ legit_urls = df[df['label'] == 0]['url'].dropna().tolist()
 random.seed(42)
 
 def get_matching_url(label):
-    if label == 1 and phishing_urls:
-        return random.choice(phishing_urls)
-    elif label == 0 and legit_urls:
-        return random.choice(legit_urls)
+    if label == 1 and phishing_urls: return random.choice(phishing_urls)
+    if label == 0 and legit_urls: return random.choice(legit_urls)
     return ""
 
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
+
+# Use only one fold for speed
+train_df = df.sample(frac=0.8, random_state=42).reset_index(drop=True)
+val_df = df.drop(train_df.index).reset_index(drop=True)
+print(f"Train samples: {len(train_df)} | Val samples: {len(val_df)}")
 
 # ====================== MODELS ======================
 class DistilBertWrapper(nn.Module):
@@ -99,114 +101,94 @@ class SimpleConcat(nn.Module):
     def forward(self, e, u):
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# ====================== RUN BOTH MODELS ON SAME FOLDS ======================
-kf = KFold(n_splits=5, shuffle=True, random_state=42)
+# ====================== TRAIN BOTH MODELS ======================
+email_model = DistilBertWrapper().to(device)
+url_model = DomURLBERT().to(device)
+mp_model = MessagePassing().to(device)
+sc_model = SimpleConcat().to(device)
 
-mp_preds = []   # Message Passing predictions
-sc_preds = []   # Simple Concat predictions
-true_labels = []
+criterion = nn.BCEWithLogitsLoss()
+optimizer_mp = optim.AdamW(list(email_model.parameters()) + list(url_model.parameters()) + list(mp_model.parameters()), lr=8e-6, weight_decay=0.08)
+optimizer_sc = optim.AdamW(list(email_model.parameters()) + list(url_model.parameters()) + list(sc_model.parameters()), lr=8e-6, weight_decay=0.08)
 
-for fold, (train_idx, val_idx) in enumerate(kf.split(df), 1):
-    print(f"\n--- Fold {fold}/5 ---")
-    train_df = df.iloc[train_idx].reset_index(drop=True)
-    val_df = df.iloc[val_idx].reset_index(drop=True)
+print("Training both models...")
 
-    # Models
-    email_model = DistilBertWrapper().to(device)
-    url_model = DomURLBERT().to(device)
-    mp_model = MessagePassing().to(device)
-    sc_model = SimpleConcat().to(device)
-
-    # Optimizer & Loss
-    params = list(email_model.parameters()) + list(url_model.parameters())
-    optimizer_mp = optim.AdamW(params + list(mp_model.parameters()), lr=8e-6, weight_decay=0.08)
-    optimizer_sc = optim.AdamW(params + list(sc_model.parameters()), lr=8e-6, weight_decay=0.08)
-    criterion = nn.BCEWithLogitsLoss()
-
-    # Quick training (you can increase epochs if you want higher accuracy)
-    for epoch in range(12):
-        # Train both models (shared base + separate fusion)
-        for model, optimizer in [(mp_model, optimizer_mp), (sc_model, optimizer_sc)]:
-            model.train()
-            for i in range(0, len(train_df), batch_size):
-                batch = train_df.iloc[i:i+batch_size]
-                labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
-                e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
-                u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
-                e_feat = email_model(e_in.input_ids, e_in.attention_mask)
-                u_feat = url_model(u_in.input_ids, u_in.attention_mask)
-                logits = model(e_feat, u_feat)
-                loss = criterion(logits, labels)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-    # ====================== COLLECT PREDICTIONS ======================
-    email_model.eval()
-    url_model.eval()
-    mp_model.eval()
-    sc_model.eval()
-
-    with torch.no_grad():
-        for i in range(0, len(val_df), 8):
-            batch = val_df.iloc[i:i+8]
+for epoch in range(12):   # Reduced for speed
+    for model, optimizer in [(mp_model, optimizer_mp), (sc_model, optimizer_sc)]:
+        model.train()
+        for i in tqdm(range(0, len(train_df), 8), desc=f"Epoch {epoch+1}"):
+            batch = train_df.iloc[i:i+8]
+            labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
             e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
             u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
             e_feat = email_model(e_in.input_ids, e_in.attention_mask)
             u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+            logits = model(e_feat, u_feat)
+            loss = criterion(logits, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-            mp_logit = mp_model(e_feat, u_feat).sigmoid().cpu().numpy()
-            sc_logit = sc_model(e_feat, u_feat).sigmoid().cpu().numpy()
+# ====================== EVALUATION & COLLECT PREDICTIONS ======================
+email_model.eval()
+url_model.eval()
+mp_model.eval()
+sc_model.eval()
 
-            mp_preds.extend((mp_logit > 0.5).astype(int).flatten())
-            sc_preds.extend((sc_logit > 0.5).astype(int).flatten())
-            true_labels.extend(batch['label'].values)
+mp_preds = []
+sc_preds = []
+true_labels = []
 
-    print(f"  Fold {fold} predictions collected.")
+with torch.no_grad():
+    for i in range(0, len(val_df), 8):
+        batch = val_df.iloc[i:i+8]
+        e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+        u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+        e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+        u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+
+        mp_logit = mp_model(e_feat, u_feat).sigmoid().cpu().numpy()
+        sc_logit = sc_model(e_feat, u_feat).sigmoid().cpu().numpy()
+
+        mp_preds.extend((mp_logit > 0.5).astype(int).flatten())
+        sc_preds.extend((sc_logit > 0.5).astype(int).flatten())
+        true_labels.extend(batch['label'].values)
 
 # ====================== MCNEMAR'S TEST ======================
 mp_preds = np.array(mp_preds)
 sc_preds = np.array(sc_preds)
-true_labels = np.array(true_labels)
+true = np.array(true_labels)
 
-# Contingency Table
-both_correct = np.sum((mp_preds == true_labels) & (sc_preds == true_labels))
-both_wrong   = np.sum((mp_preds != true_labels) & (sc_preds != true_labels))
-mp_only      = np.sum((mp_preds == true_labels) & (sc_preds != true_labels))
-sc_only      = np.sum((mp_preds != true_labels) & (sc_preds == true_labels))
+b = np.sum((mp_preds == true) & (sc_preds != true))   # MP correct, SC wrong
+c = np.sum((mp_preds != true) & (sc_preds == true))   # SC correct, MP wrong
 
-# McNemar's Statistic
-b = mp_only
-c = sc_only
 if (b + c) == 0:
-    mcnemar_stat = 0
     p_value = 1.0
+    stat = 0
 else:
-    mcnemar_stat = (abs(b - c) - 1) ** 2 / (b + c)
-    p_value = 1 - chi2.cdf(mcnemar_stat, df=1)
+    stat = (abs(b - c) - 1) ** 2 / (b + c)
+    p_value = 1 - chi2.cdf(stat, 1)
 
 print("\n" + "="*70)
 print("MCNEMAR'S TEST RESULT")
 print("="*70)
-print(f"Message Passing only correct : {b}")
-print(f"Simple Concat only correct   : {c}")
-print(f"McNemar's statistic          : {mcnemar_stat:.4f}")
-print(f"p-value                      : {p_value:.6f}")
+print(f"Message Passing (2 rounds) only correct : {b}")
+print(f"Simple Concat only correct             : {c}")
+print(f"McNemar statistic                      : {stat:.4f}")
+print(f"p-value                                : {p_value:.6f}")
 
 if p_value < 0.05:
-    print("✅ **Statistically significant difference** (p < 0.05)")
+    print("✅ Statistically significant difference!")
     if b > c:
-        print("→ Message Passing (2 rounds) is significantly better than Simple Concat")
+        print("→ Message Passing (2 rounds) is significantly better")
     else:
         print("→ Simple Concat is significantly better")
 else:
-    print("→ No statistically significant difference between the two methods")
+    print("→ No statistically significant difference")
 
-# Save for report
+# Save predictions
 np.save("mp_predictions.npy", mp_preds)
 np.save("sc_predictions.npy", sc_preds)
-np.save("true_labels.npy", true_labels)
+np.save("true_labels.npy", true)
 
-print("\nPredictions saved successfully.")
-print("You can now confidently write in your report:")
-print(f"McNemar's test showed p = {p_value:.4f} ...")
+print("\nPredictions saved. Ready for your report.")
