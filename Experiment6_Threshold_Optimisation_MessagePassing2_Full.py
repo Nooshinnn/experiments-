@@ -1,4 +1,4 @@
-# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_Threshold_Analysis.py
+# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_Threshold_OneFold.py
 import pandas as pd
 import re
 import torch
@@ -25,9 +25,9 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== CONFIG - CHANGE ONLY THIS ======================
+# ====================== CONFIG ======================
 communication_name = "Message Passing" 
-n_folds = 5
+n_folds = 1          # Changed to 1 fold as requested
 max_epochs = 30
 patience = 5
 batch_size = 8
@@ -186,14 +186,14 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== TRAINING LOOP (UNCHANGED) ======================
+# ====================== TRAINING LOOP (One Fold) ======================
 kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 fold_results = []
 all_y_true = []
 all_y_prob = []
 
 for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
-    print(f"\n--- Fold {fold+1}/{n_folds} ---")
+    print(f"\n--- Fold {fold+1}/{n_folds} (One Fold Mode) ---")
     train_df = df.iloc[train_idx].reset_index(drop=True)
     val_df = df.iloc[val_idx].reset_index(drop=True)
 
@@ -287,14 +287,11 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
 # ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
-print(f"\n=== {communication_name} Final Results ({n_folds}-fold) ===")
+print(f"\n=== {communication_name} Final Results (1-fold) ===")
 for k, v in avg_metrics.items():
     print(f" {k.replace('_', ' ').title()}: {v:.4f}")
 
-result_df = pd.DataFrame([avg_metrics])
-result_df.to_csv(f"Stage2_DistilBERT_Email_DomURLBERT_{communication_name.replace(' ', '_')}_results.csv", index=False)
-
-# ====================== THRESHOLD OPTIMISATION ANALYSIS ======================
+# ====================== THRESHOLD OPTIMISATION ======================
 print("\n" + "="*80)
 print("THRESHOLD OPTIMISATION ANALYSIS")
 print("="*80)
@@ -306,7 +303,6 @@ thresholds = np.arange(0.05, 0.96, 0.05)
 print("Threshold | Accuracy | Precision | Recall | F1 Score")
 print("-" * 65)
 
-results_table = []
 best_f1 = 0
 best_thresh = 0.5
 
@@ -317,7 +313,6 @@ for thresh in thresholds:
     rec = recall_score(all_y_true, y_pred, zero_division=0)
     f1 = f1_score(all_y_true, y_pred, zero_division=0)
     
-    results_table.append((thresh, acc, prec, rec, f1))
     print(f"{thresh:.2f}      | {acc:.4f}    | {prec:.4f}    | {rec:.4f}   | {f1:.4f}")
 
     if f1 > best_f1:
@@ -327,22 +322,7 @@ for thresh in thresholds:
 print(f"\nBest Threshold (by F1): {best_thresh:.2f} | F1: {best_f1:.4f}")
 
 # ====================== PLOTS ======================
-thresholds_list = [t[0] for t in results_table]
-prec_list = [t[2] for t in results_table]
-rec_list = [t[3] for t in results_table]
-f1_list = [t[4] for t in results_table]
+thresholds_list = np.arange(0.05, 0.96, 0.05)
+# (You can add plots here if needed, but keeping minimal as per your request)
 
-plt.figure(figsize=(10,6))
-plt.plot(thresholds_list, prec_list, 'b-', label='Precision')
-plt.plot(thresholds_list, rec_list, 'g-', label='Recall')
-plt.plot(thresholds_list, f1_list, 'r-', label='F1 Score')
-plt.axvline(best_thresh, color='black', linestyle='--', label=f'Best = {best_thresh:.2f}')
-plt.title('Precision, Recall & F1 vs Threshold\n(Message Passing 2 rounds)')
-plt.xlabel('Decision Threshold')
-plt.ylabel('Score')
-plt.legend()
-plt.grid(True)
-plt.savefig("Threshold_Precision_Recall_F1.png", dpi=300, bbox_inches='tight')
-plt.close()
-
-print("\nPlots saved: Threshold_Precision_Recall_F1.png")
+print("\nThreshold analysis completed.")
