@@ -1,8 +1,10 @@
-# File: Experiment3_McNemar_Test_MessagePassing_vs_SimpleConcat.py
+# File: Experiment3_McNemar_MessagePassing_vs_SimpleConcat_Full.py
 import pandas as pd
 import re
 import torch
 import torch.nn as nn
+import torch.optim as optim
+import gc
 import numpy as np
 from sklearn.model_selection import KFold
 from sklearn.metrics import confusion_matrix
@@ -11,15 +13,19 @@ from datasets import load_dataset
 import warnings
 from tqdm import tqdm
 import random
+from scipy.stats import chi2
 
 warnings.filterwarnings("ignore")
 torch.manual_seed(42)
 np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-print("=== Experiment 3: McNemar's Test (Message Passing 2 rounds vs Simple Concat) ===")
+print("="*80)
+print("EXPERIMENT 3: McNemar's Test")
+print("Message Passing (2 rounds) vs Simple Concat")
+print("="*80)
 
-# ====================== DATASET ======================
+# ====================== DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -36,8 +42,10 @@ legit_urls = df[df['label'] == 0]['url'].dropna().tolist()
 random.seed(42)
 
 def get_matching_url(label):
-    if label == 1 and phishing_urls: return random.choice(phishing_urls)
-    if label == 0 and legit_urls: return random.choice(legit_urls)
+    if label == 1 and phishing_urls:
+        return random.choice(phishing_urls)
+    elif label == 0 and legit_urls:
+        return random.choice(legit_urls)
     return ""
 
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
@@ -70,7 +78,7 @@ class DomURLBERT(nn.Module):
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# Message Passing 2 rounds
+# Message Passing (2 rounds)
 class MessagePassing(nn.Module):
     def __init__(self):
         super().__init__()
@@ -94,33 +102,46 @@ class SimpleConcat(nn.Module):
 # ====================== RUN BOTH MODELS ON SAME FOLDS ======================
 kf = KFold(n_splits=5, shuffle=True, random_state=42)
 
-mp_predictions = []   # Message Passing predictions
-sc_predictions = []   # Simple Concat predictions
+mp_preds = []   # Message Passing predictions
+sc_preds = []   # Simple Concat predictions
 true_labels = []
 
-for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
-    print(f"\n--- Fold {fold+1}/5 ---")
+for fold, (train_idx, val_idx) in enumerate(kf.split(df), 1):
+    print(f"\n--- Fold {fold}/5 ---")
+    train_df = df.iloc[train_idx].reset_index(drop=True)
     val_df = df.iloc[val_idx].reset_index(drop=True)
 
-    # Train both models (minimal training to get predictions)
+    # Models
     email_model = DistilBertWrapper().to(device)
     url_model = DomURLBERT().to(device)
-
-    # Message Passing
     mp_model = MessagePassing().to(device)
-    # Simple Concat
     sc_model = SimpleConcat().to(device)
 
-    # Quick training (you can increase epochs if needed)
-    optimizer_mp = optim.AdamW(list(email_model.parameters()) + list(url_model.parameters()) + list(mp_model.parameters()), lr=1e-5)
-    optimizer_sc = optim.AdamW(list(email_model.parameters()) + list(url_model.parameters()) + list(sc_model.parameters()), lr=1e-5)
+    # Optimizer & Loss
+    params = list(email_model.parameters()) + list(url_model.parameters())
+    optimizer_mp = optim.AdamW(params + list(mp_model.parameters()), lr=8e-6, weight_decay=0.08)
+    optimizer_sc = optim.AdamW(params + list(sc_model.parameters()), lr=8e-6, weight_decay=0.08)
     criterion = nn.BCEWithLogitsLoss()
 
-    # Train loop (short for speed)
-    for epoch in range(8):
-        # ... (same training code as your original, omitted for brevity) ...
+    # Quick training (you can increase epochs if you want higher accuracy)
+    for epoch in range(12):
+        # Train both models (shared base + separate fusion)
+        for model, optimizer in [(mp_model, optimizer_mp), (sc_model, optimizer_sc)]:
+            model.train()
+            for i in range(0, len(train_df), batch_size):
+                batch = train_df.iloc[i:i+batch_size]
+                labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+                e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+                u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+                e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+                u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+                logits = model(e_feat, u_feat)
+                loss = criterion(logits, labels)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-    # Evaluation - collect predictions
+    # ====================== COLLECT PREDICTIONS ======================
     email_model.eval()
     url_model.eval()
     mp_model.eval()
@@ -134,55 +155,58 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             e_feat = email_model(e_in.input_ids, e_in.attention_mask)
             u_feat = url_model(u_in.input_ids, u_in.attention_mask)
 
-            mp_logits = mp_model(e_feat, u_feat)
-            sc_logits = sc_model(e_feat, u_feat)
+            mp_logit = mp_model(e_feat, u_feat).sigmoid().cpu().numpy()
+            sc_logit = sc_model(e_feat, u_feat).sigmoid().cpu().numpy()
 
-            mp_pred = (mp_logits.sigmoid().cpu().numpy() > 0.5).astype(int).flatten()
-            sc_pred = (sc_logits.sigmoid().cpu().numpy() > 0.5).astype(int).flatten()
-
-            mp_predictions.extend(mp_pred)
-            sc_predictions.extend(sc_pred)
+            mp_preds.extend((mp_logit > 0.5).astype(int).flatten())
+            sc_preds.extend((sc_logit > 0.5).astype(int).flatten())
             true_labels.extend(batch['label'].values)
 
+    print(f"  Fold {fold} predictions collected.")
+
 # ====================== MCNEMAR'S TEST ======================
-mp_predictions = np.array(mp_predictions)
-sc_predictions = np.array(sc_predictions)
+mp_preds = np.array(mp_preds)
+sc_preds = np.array(sc_preds)
 true_labels = np.array(true_labels)
 
-# Contingency table
-both_correct = np.sum((mp_predictions == true_labels) & (sc_predictions == true_labels))
-both_wrong   = np.sum((mp_predictions != true_labels) & (sc_predictions != true_labels))
-mp_only_correct = np.sum((mp_predictions == true_labels) & (sc_predictions != true_labels))
-sc_only_correct = np.sum((mp_predictions != true_labels) & (sc_predictions == true_labels))
+# Contingency Table
+both_correct = np.sum((mp_preds == true_labels) & (sc_preds == true_labels))
+both_wrong   = np.sum((mp_preds != true_labels) & (sc_preds != true_labels))
+mp_only      = np.sum((mp_preds == true_labels) & (sc_preds != true_labels))
+sc_only      = np.sum((mp_preds != true_labels) & (sc_preds == true_labels))
 
-# McNemar's Test Statistic
-b = mp_only_correct
-c = sc_only_correct
-mcnemar_stat = (abs(b - c) - 1)**2 / (b + c) if (b + c) > 0 else 0
+# McNemar's Statistic
+b = mp_only
+c = sc_only
+if (b + c) == 0:
+    mcnemar_stat = 0
+    p_value = 1.0
+else:
+    mcnemar_stat = (abs(b - c) - 1) ** 2 / (b + c)
+    p_value = 1 - chi2.cdf(mcnemar_stat, df=1)
 
-# p-value (chi-square approximation)
-from scipy.stats import chi2
-p_value = 1 - chi2.cdf(mcnemar_stat, 1)
-
-print("\n" + "="*60)
-print("MCNEMAR'S TEST RESULTS")
-print("="*60)
+print("\n" + "="*70)
+print("MCNEMAR'S TEST RESULT")
+print("="*70)
 print(f"Message Passing only correct : {b}")
 print(f"Simple Concat only correct   : {c}")
 print(f"McNemar's statistic          : {mcnemar_stat:.4f}")
 print(f"p-value                      : {p_value:.6f}")
 
 if p_value < 0.05:
-    print("→ **Statistically significant difference** (p < 0.05)")
+    print("✅ **Statistically significant difference** (p < 0.05)")
     if b > c:
-        print("→ Message Passing (2 rounds) is significantly better")
+        print("→ Message Passing (2 rounds) is significantly better than Simple Concat")
     else:
         print("→ Simple Concat is significantly better")
 else:
-    print("→ No statistically significant difference (p >= 0.05)")
+    print("→ No statistically significant difference between the two methods")
 
-# Save predictions for future use
-np.save("mp_predictions.npy", mp_predictions)
-np.save("sc_predictions.npy", sc_predictions)
+# Save for report
+np.save("mp_predictions.npy", mp_preds)
+np.save("sc_predictions.npy", sc_preds)
 np.save("true_labels.npy", true_labels)
-print("\nPredictions saved: mp_predictions.npy, sc_predictions.npy, true_labels.npy")
+
+print("\nPredictions saved successfully.")
+print("You can now confidently write in your report:")
+print(f"McNemar's test showed p = {p_value:.4f} ...")
