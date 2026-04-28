@@ -1,4 +1,4 @@
 py -3.10 -m venv torch_env
 .\torch_env\Scripts\activate
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-python -m pip install pandas numpy scikit-learn transformers datasets tqdm  
+python -m pip install pandas numpy scikit-learn transformers datasets tqdm seaborn matplotlib
