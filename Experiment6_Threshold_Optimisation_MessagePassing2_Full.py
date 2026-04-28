@@ -1,13 +1,21 @@
-# File: Experiment6_Threshold_Optimisation_MessagePassing2_Full.py
+# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_Threshold_Analysis.py
 import pandas as pd
 import re
 import torch
 import torch.nn as nn
+import torch.optim as optim
+import gc
 import numpy as np
-from sklearn.metrics import precision_recall_curve, f1_score, precision_score, recall_score, accuracy_score
+from sklearn.model_selection import KFold
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, confusion_matrix, matthews_corrcoef,
+    balanced_accuracy_score, cohen_kappa_score, average_precision_score, log_loss
+)
 from transformers import AutoTokenizer, AutoModel
 from datasets import load_dataset
 import warnings
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 import random
 
@@ -15,17 +23,22 @@ warnings.filterwarnings("ignore")
 torch.manual_seed(42)
 np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-print("="*90)
-print("EXPERIMENT 6: Threshold Optimisation Analysis")
-print("Message Passing (2 rounds) - Security-focused Recall Priority")
-print("="*90)
+# ====================== CONFIG - CHANGE ONLY THIS ======================
+communication_name = "Message Passing" 
+n_folds = 5
+max_epochs = 30
+patience = 5
+batch_size = 8
+print(f"Running Style: {communication_name} | {n_folds}-fold | Max epochs: {max_epochs}")
 
-# ====================== LOAD DATASET ======================
+# ====================== LOAD DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
-df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
-df = df.rename(columns={"labels": "label", "content": "email_text"})
+label_col = 'labels' if 'labels' in df.columns else 'label'
+df = df[df[label_col].isin([0, 1])].reset_index(drop=True)
+df = df.rename(columns={label_col: "label", "content": "email_text"})
 
 def extract_first_url(text):
     urls = re.findall(r'https?://\S+', str(text))
@@ -33,24 +46,21 @@ def extract_first_url(text):
 
 df['url'] = df['email_text'].apply(extract_first_url)
 
-# Clean pairing
 phishing_urls = df[df['label'] == 1]['url'].dropna().tolist()
 legit_urls = df[df['label'] == 0]['url'].dropna().tolist()
 random.seed(42)
 
 def get_matching_url(label):
-    if label == 1 and phishing_urls: return random.choice(phishing_urls)
-    if label == 0 and legit_urls: return random.choice(legit_urls)
+    if label == 1 and phishing_urls:
+        return random.choice(phishing_urls)
+    elif label == 0 and legit_urls:
+        return random.choice(legit_urls)
     return ""
 
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
+print(f"Final samples with clean pairing: {len(df)}")
 
-# Held-out test set
-from sklearn.model_selection import train_test_split
-train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['label'], random_state=42)
-test_df = test_df.reset_index(drop=True)
-
-# ====================== MODELS (Your Best Config) ======================
+# ====================== MODELS ======================
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -75,105 +85,259 @@ class DomURLBERT(nn.Module):
         pooled = self.dropout(pooled)
         return self.fc(pooled)
 
-class MessagePassing(nn.Module):
-    def __init__(self, rounds=2):
-        super().__init__()
-        self.rounds = rounds
-        self.update_e = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
-        self.update_u = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
-        self.fc = nn.Linear(256, 1)
-    def forward(self, e, u):
-        for _ in range(self.rounds):
-            e = self.update_e(torch.cat([e, u], dim=1))
-            u = self.update_u(torch.cat([u, e], dim=1))
-        return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
-
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-email_model = DistilBertWrapper().to(device)
-url_model = DomURLBERT().to(device)
-mp_model = MessagePassing(rounds=2).to(device)
+# ====================== COMMUNICATION MODULES ======================
+class SimpleConcat(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 1))
+    def forward(self, e, u):
+        return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# ====================== GET PROBABILITIES ======================
-email_model.eval()
-url_model.eval()
-mp_model.eval()
+class WeightedScore(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor([0.5, 0.5]))
+    def forward(self, email_score, url_score):
+        w = torch.softmax(self.weight, dim=0)
+        return w[0] * email_score + w[1] * url_score
 
-y_true = []
-y_prob = []
+class GatedFusion(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = nn.Sequential(nn.Linear(256, 64), nn.ReLU(), nn.Linear(64, 2), nn.Softmax(dim=1))
+    def forward(self, e, u):
+        comm = torch.cat([e, u], dim=1)
+        gate = self.gate(comm)
+        e_score = torch.sigmoid(torch.mean(e, dim=1))
+        u_score = torch.sigmoid(torch.mean(u, dim=1))
+        return gate[:, 0] * e_score + gate[:, 1] * u_score
 
-print("Generating probability outputs...")
-with torch.no_grad():
-    for i in range(0, len(test_df), 8):
-        batch = test_df.iloc[i:i+8]
-        e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
-        u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
-        e_feat = email_model(e_in.input_ids, e_in.attention_mask)
-        u_feat = url_model(u_in.input_ids, u_in.attention_mask)
-        logits = mp_model(e_feat, u_feat)
-        prob = logits.sigmoid().cpu().numpy().flatten()
-        y_prob.extend(prob)
-        y_true.extend(batch['label'].values)
+class CrossAttention(nn.Module):
+    def __init__(self, dim=128):
+        super().__init__()
+        self.dim = dim
+        self.query = nn.Linear(dim, dim)
+        self.key = nn.Linear(dim, dim)
+        self.value = nn.Linear(dim, dim)
+        self.fc = nn.Linear(dim*2, 1)
+    def forward(self, e, u):
+        Q = self.query(e)
+        K = self.key(u)
+        V = self.value(u)
+        attn = torch.softmax(torch.matmul(Q, K.transpose(-2,-1)) / np.sqrt(self.dim), dim=-1)
+        attended = torch.matmul(attn, V)
+        comm = torch.cat([e, attended], dim=1)
+        return self.fc(comm).squeeze(-1)
 
-y_true = np.array(y_true)
-y_prob = np.array(y_prob)
+class MessagePassing(nn.Module):
+    def __init__(self, dim=128, rounds=2):
+        super().__init__()
+        self.rounds = rounds
+        self.dim = dim
+        self.update_e = nn.Sequential(nn.Linear(dim*2, dim), nn.ReLU(), nn.Dropout(0.3))
+        self.update_u = nn.Sequential(nn.Linear(dim*2, dim), nn.ReLU(), nn.Dropout(0.3))
+        self.fc = nn.Linear(dim*2, 1)
+    def forward(self, e, u):
+        for _ in range(self.rounds):
+            e_new = self.update_e(torch.cat([e, u], dim=1))
+            u_new = self.update_u(torch.cat([u, e], dim=1))
+            e, u = e_new, u_new
+        comm = torch.cat([e, u], dim=1)
+        return self.fc(comm).squeeze(-1)
 
-# ====================== THRESHOLD ANALYSIS ======================
-thresholds = np.arange(0.1, 1.0, 0.05)
-results = []
+class NoCommunication:
+    @staticmethod
+    def forward(e_feat, u_feat):
+        e_score = torch.sigmoid(torch.mean(e_feat, dim=1))
+        u_score = torch.sigmoid(torch.mean(u_feat, dim=1))
+        return (e_score + u_score) / 2.0
 
-print("\nThreshold | Accuracy | Precision | Recall | F1 Score")
-print("-" * 60)
+comm_dict = {
+    "No Communication": None,
+    "Simple Concat": SimpleConcat,
+    "Weighted Score": WeightedScore,
+    "Gated Fusion": GatedFusion,
+    "Cross Attention": CrossAttention,
+    "Message Passing": MessagePassing
+}
+comm_class = comm_dict[communication_name]
 
+# ====================== METRICS FUNCTION ======================
+def compute_all_metrics(y_true, y_pred, y_prob=None):
+    metrics = {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average='binary', zero_division=0),
+        "recall": recall_score(y_true, y_pred, average='binary', zero_division=0),
+        "f1": f1_score(y_true, y_pred, average='binary', zero_division=0),
+        "f1_macro": f1_score(y_true, y_pred, average='macro', zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average='weighted', zero_division=0),
+        "mcc": matthews_corrcoef(y_true, y_pred),
+        "cohen_kappa": cohen_kappa_score(y_true, y_pred),
+    }
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    metrics["specificity"] = tn / (tn + fp) if (tn + fp) > 0 else 0
+    if y_prob is not None:
+        metrics["roc_auc"] = roc_auc_score(y_true, y_prob)
+        metrics["avg_precision"] = average_precision_score(y_true, y_prob)
+        metrics["log_loss"] = log_loss(y_true, y_prob)
+    return metrics
+
+# ====================== TRAINING LOOP (UNCHANGED) ======================
+kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+fold_results = []
+all_y_true = []
+all_y_prob = []
+
+for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
+    print(f"\n--- Fold {fold+1}/{n_folds} ---")
+    train_df = df.iloc[train_idx].reset_index(drop=True)
+    val_df = df.iloc[val_idx].reset_index(drop=True)
+
+    email_model = DistilBertWrapper().to(device)
+    url_model = DomURLBERT().to(device)
+    comm_model = comm_class().to(device) if comm_class is not None else None
+
+    params = list(email_model.parameters()) + list(url_model.parameters())
+    if comm_model:
+        params += list(comm_model.parameters())
+
+    optimizer = optim.AdamW(params, lr=8e-6, weight_decay=0.08)
+    criterion = nn.BCEWithLogitsLoss()
+
+    best_loss = float('inf')
+    patience_counter = 0
+
+    for epoch in range(max_epochs):
+        email_model.train()
+        url_model.train()
+        if comm_model: comm_model.train()
+        train_loss = 0.0
+        progress_bar = tqdm(range(0, len(train_df), batch_size), desc=f"Epoch {epoch+1:2d}/{max_epochs}", leave=False)
+        for i in progress_bar:
+            batch = train_df.iloc[i:i+batch_size]
+            labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+            e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+            u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+            e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+            u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+
+            if communication_name == "No Communication":
+                prob = NoCommunication.forward(e_feat, u_feat)
+                logits = prob * 2 - 1
+            else:
+                logits = comm_model(e_feat, u_feat)
+
+            loss = criterion(logits, labels)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            progress_bar.set_postfix({'Train Loss': f'{train_loss / (i//batch_size + 1):.4f}'})
+
+        avg_train_loss = train_loss / (len(train_df) // batch_size + 1)
+        if avg_train_loss < best_loss:
+            best_loss = avg_train_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        if patience_counter >= patience:
+            print(f" Early stopping at epoch {epoch+1}")
+            break
+
+    # ====================== EVALUATION ======================
+    email_model.eval()
+    url_model.eval()
+    if comm_model: comm_model.eval()
+    y_true = val_df['label'].values
+    y_pred = []
+    y_prob = []
+    with torch.no_grad():
+        for i in range(0, len(val_df), batch_size):
+            batch = val_df.iloc[i:i+batch_size]
+            e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+            u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+            e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+            u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+
+            if communication_name == "No Communication":
+                prob = NoCommunication.forward(e_feat, u_feat).cpu().numpy()
+            else:
+                logits = comm_model(e_feat, u_feat)
+                prob = logits.sigmoid().cpu().numpy()
+
+            pred = (prob > 0.5).astype(int)
+            y_pred.extend(pred)
+            y_prob.extend(prob)
+
+    metrics = compute_all_metrics(y_true, y_pred, y_prob)
+    fold_results.append(metrics)
+
+    all_y_true.extend(y_true)
+    all_y_prob.extend(y_prob)
+
+    del email_model, url_model
+    if comm_model: del comm_model
+    torch.cuda.empty_cache()
+    gc.collect()
+
+# ====================== FINAL RESULTS ======================
+avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
+print(f"\n=== {communication_name} Final Results ({n_folds}-fold) ===")
+for k, v in avg_metrics.items():
+    print(f" {k.replace('_', ' ').title()}: {v:.4f}")
+
+result_df = pd.DataFrame([avg_metrics])
+result_df.to_csv(f"Stage2_DistilBERT_Email_DomURLBERT_{communication_name.replace(' ', '_')}_results.csv", index=False)
+
+# ====================== THRESHOLD OPTIMISATION ANALYSIS ======================
+print("\n" + "="*80)
+print("THRESHOLD OPTIMISATION ANALYSIS")
+print("="*80)
+
+all_y_true = np.array(all_y_true)
+all_y_prob = np.array(all_y_prob)
+
+thresholds = np.arange(0.05, 0.96, 0.05)
+print("Threshold | Accuracy | Precision | Recall | F1 Score")
+print("-" * 65)
+
+results_table = []
 best_f1 = 0
 best_thresh = 0.5
-best_recall = 0
 
 for thresh in thresholds:
-    y_pred = (y_prob >= thresh).astype(int)
-    acc = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    rec = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
+    y_pred = (all_y_prob >= thresh).astype(int)
+    acc = accuracy_score(all_y_true, y_pred)
+    prec = precision_score(all_y_true, y_pred, zero_division=0)
+    rec = recall_score(all_y_true, y_pred, zero_division=0)
+    f1 = f1_score(all_y_true, y_pred, zero_division=0)
     
-    results.append({
-        "Threshold": thresh,
-        "Accuracy": acc,
-        "Precision": prec,
-        "Recall": rec,
-        "F1": f1
-    })
-    
+    results_table.append((thresh, acc, prec, rec, f1))
     print(f"{thresh:.2f}      | {acc:.4f}    | {prec:.4f}    | {rec:.4f}   | {f1:.4f}")
-    
+
     if f1 > best_f1:
         best_f1 = f1
         best_thresh = thresh
-        best_recall = rec
 
-# ====================== SUMMARY TABLE ======================
-print("\n" + "="*70)
-print("THRESHOLD OPTIMISATION SUMMARY")
-print("="*70)
-print(f"Best Threshold (by F1) : {best_thresh:.2f}")
-print(f"F1 Score                : {best_f1:.4f}")
-print(f"Recall                  : {best_recall:.4f}")
-print(f"Recommended for Security: Threshold = {best_thresh:.2f} (High Recall Priority)")
+print(f"\nBest Threshold (by F1): {best_thresh:.2f} | F1: {best_f1:.4f}")
 
 # ====================== PLOTS ======================
-# Plot 1: Precision, Recall, F1 vs Threshold
-thresholds_list = [r["Threshold"] for r in results]
-prec_list = [r["Precision"] for r in results]
-rec_list = [r["Recall"] for r in results]
-f1_list = [r["F1"] for r in results]
+thresholds_list = [t[0] for t in results_table]
+prec_list = [t[2] for t in results_table]
+rec_list = [t[3] for t in results_table]
+f1_list = [t[4] for t in results_table]
 
-plt.figure(figsize=(10, 6))
+plt.figure(figsize=(10,6))
 plt.plot(thresholds_list, prec_list, 'b-', label='Precision')
 plt.plot(thresholds_list, rec_list, 'g-', label='Recall')
 plt.plot(thresholds_list, f1_list, 'r-', label='F1 Score')
-plt.axvline(best_thresh, color='black', linestyle='--', label=f'Best Threshold = {best_thresh:.2f}')
-plt.title('Precision, Recall & F1 vs Decision Threshold\n(Message Passing 2 rounds)')
+plt.axvline(best_thresh, color='black', linestyle='--', label=f'Best = {best_thresh:.2f}')
+plt.title('Precision, Recall & F1 vs Threshold\n(Message Passing 2 rounds)')
 plt.xlabel('Decision Threshold')
 plt.ylabel('Score')
 plt.legend()
@@ -181,20 +345,4 @@ plt.grid(True)
 plt.savefig("Threshold_Precision_Recall_F1.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# Plot 2: Precision-Recall Curve
-prec, rec, _ = precision_recall_curve(y_true, y_prob)
-plt.figure(figsize=(10, 6))
-plt.plot(rec, prec, label='PR Curve')
-plt.scatter(rec_list, prec_list, c='red', s=40, label='Evaluated Thresholds')
-plt.title('Precision-Recall Curve with Threshold Points')
-plt.xlabel('Recall')
-plt.ylabel('Precision')
-plt.legend()
-plt.grid(True)
-plt.savefig("Precision_Recall_Curve_Thresholds.png", dpi=300, bbox_inches='tight')
-plt.close()
-
-print("\n✅ Plots and table generated successfully!")
-print("Saved files:")
-print("   • Threshold_Precision_Recall_F1.png")
-print("   • Precision_Recall_Curve_Thresholds.png")
+print("\nPlots saved: Threshold_Precision_Recall_F1.png")
