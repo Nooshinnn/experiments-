@@ -1,4 +1,4 @@
-# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_With_Plots.py
+# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_With_Plots_ValEarlyStopping.py
 import pandas as pd
 import re
 import torch
@@ -18,7 +18,6 @@ import warnings
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
-import json
 
 warnings.filterwarnings("ignore")
 torch.manual_seed(42)
@@ -26,7 +25,7 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== CONFIG - CHANGE ONLY THIS ======================
+# ====================== CONFIG ======================
 communication_name = "Message Passing"
 n_folds = 5
 max_epochs = 30
@@ -188,14 +187,12 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== TRAINING LOOP (UNCHANGED) ======================
+# ====================== TRAINING LOOP (with Validation Loss Early Stopping) ======================
 kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 fold_results = []
 all_y_true = []
 all_y_pred = []
 all_y_prob = []
-all_train_losses = []   # For plots
-all_val_losses = []     # For plots
 
 for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     print(f"\n--- Fold {fold+1}/{n_folds} ---")
@@ -213,12 +210,11 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     optimizer = optim.AdamW(params, lr=8e-6, weight_decay=0.08)
     criterion = nn.BCEWithLogitsLoss()
 
-    best_loss = float('inf')
+    best_val_loss = float('inf')
     patience_counter = 0
-    train_losses_fold = []
-    val_losses_fold = []
 
     for epoch in range(max_epochs):
+        # Training
         email_model.train()
         url_model.train()
         if comm_model: comm_model.train()
@@ -252,19 +248,47 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             train_loss += loss.item()
             progress_bar.set_postfix({'Train Loss': f'{train_loss / (i//batch_size + 1):.4f}'})
 
-        avg_train_loss = train_loss / (len(train_df) // batch_size + 1)
-        train_losses_fold.append(avg_train_loss)
+        # Validation Loss (for early stopping)
+        email_model.eval()
+        url_model.eval()
+        if comm_model: comm_model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for i in range(0, len(val_df), batch_size):
+                batch = val_df.iloc[i:i+batch_size]
+                labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+                e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+                u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+                e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+                u_feat = url_model(u_in.input_ids, u_in.attention_mask)
 
-        if avg_train_loss < best_loss:
-            best_loss = avg_train_loss
+                if communication_name == "No Communication":
+                    prob = NoCommunication.forward(e_feat, u_feat)
+                    logits = prob * 2 - 1
+                elif communication_name == "Simple Concat":
+                    logits = comm_model(e_feat, u_feat)
+                elif communication_name == "Weighted Score":
+                    e_score = torch.sigmoid(torch.mean(e_feat, dim=1))
+                    u_score = torch.sigmoid(torch.mean(u_feat, dim=1))
+                    logits = comm_model(e_score, u_score)
+                else:
+                    logits = comm_model(e_feat, u_feat)
+
+                loss = criterion(logits, labels)
+                val_loss += loss.item()
+
+        avg_val_loss = val_loss / (len(val_df) // batch_size + 1)
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             patience_counter = 0
         else:
             patience_counter += 1
-        if patience_counter >= patience:
-            print(f" Early stopping at epoch {epoch+1}")
-            break
+            if patience_counter >= patience:
+                print(f" Early stopping at epoch {epoch+1} (Val Loss)")
+                break
 
-    # ====================== EVALUATION ======================
+    # ====================== FINAL EVALUATION ======================
     email_model.eval()
     url_model.eval()
     if comm_model: comm_model.eval()
@@ -322,7 +346,7 @@ all_y_true = np.array(all_y_true)
 all_y_pred = np.array(all_y_pred)
 all_y_prob = np.array(all_y_prob)
 
-# 1. ROC Curve
+# ROC Curve
 fpr, tpr, _ = roc_curve(all_y_true, all_y_prob)
 plt.figure(figsize=(8,6))
 plt.plot(fpr, tpr, label=f'ROC AUC = {roc_auc_score(all_y_true, all_y_prob):.4f}')
@@ -335,7 +359,7 @@ plt.grid()
 plt.savefig("ROC_Curve.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# 2. Precision-Recall Curve
+# Precision-Recall Curve
 prec, rec, _ = precision_recall_curve(all_y_true, all_y_prob)
 plt.figure(figsize=(8,6))
 plt.plot(rec, prec, label=f'AP = {average_precision_score(all_y_true, all_y_prob):.4f}')
@@ -347,7 +371,7 @@ plt.grid()
 plt.savefig("Precision_Recall_Curve.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# 3. Per-class Precision & Recall
+# Per-class Precision & Recall
 per_class_prec = precision_score(all_y_true, all_y_pred, average=None)
 per_class_rec = recall_score(all_y_true, all_y_pred, average=None)
 x = np.arange(2)
@@ -361,7 +385,7 @@ plt.legend()
 plt.savefig("PerClass_Precision_Recall.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# 4. Confusion Matrix
+# Confusion Matrix
 cm = confusion_matrix(all_y_true, all_y_pred)
 plt.figure(figsize=(6,5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
@@ -373,7 +397,7 @@ plt.xlabel('Predicted Label')
 plt.savefig("Confusion_Matrix.png", dpi=300, bbox_inches='tight')
 plt.close()
 
-# 5. Classification Report
+# Classification Report
 report = classification_report(all_y_true, all_y_pred, target_names=['Legitimate (0)', 'Phishing (1)'], output_dict=True)
 report_df = pd.DataFrame(report).transpose().round(4)
 fig, ax = plt.subplots(figsize=(10,6))
@@ -384,4 +408,4 @@ plt.savefig("Classification_Report.png", dpi=300, bbox_inches='tight')
 plt.close()
 
 print("\n✅ All plots generated successfully!")
-print("Saved: ROC_Curve.png, Precision_Recall_Curve.png, PerClass_Precision_Recall.png, Confusion_Matrix.png, Classification_Report.png")
+print("Saved plots: ROC_Curve.png, Precision_Recall_Curve.png, PerClass_Precision_Recall.png, Confusion_Matrix.png, Classification_Report.png")
