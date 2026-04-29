@@ -1,0 +1,189 @@
+# File: PPO_vs_Original_MessagePassing_Comparison.py
+import pandas as pd
+import re
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from sklearn.model_selection import KFold
+from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
+from transformers import AutoTokenizer, AutoModel
+from datasets import load_dataset
+import warnings
+from tqdm import tqdm
+import random
+
+warnings.filterwarnings("ignore")
+torch.manual_seed(42)
+np.random.seed(42)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print("="*90)
+print("FAIR COMPARISON: Original Message Passing (2 rounds) vs PPO Dynamic Weighting")
+print("="*90)
+
+# ====================== DATASET ======================
+dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
+df = pd.DataFrame(dataset)
+df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
+df = df.rename(columns={"labels": "label", "content": "email_text"})
+
+def extract_first_url(text):
+    urls = re.findall(r'https?://\S+', str(text))
+    return urls[0] if urls else None
+
+df['url'] = df['email_text'].apply(extract_first_url)
+
+# Clean pairing
+phishing_urls = df[df['label'] == 1]['url'].dropna().tolist()
+legit_urls = df[df['label'] == 0]['url'].dropna().tolist()
+random.seed(42)
+
+def get_matching_url(label):
+    if label == 1 and phishing_urls: return random.choice(phishing_urls)
+    if label == 0 and legit_urls: return random.choice(legit_urls)
+    return ""
+
+df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
+
+# ====================== MODELS ======================
+class DistilBertWrapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = AutoModel.from_pretrained("distilbert-base-uncased")
+        self.fc = nn.Linear(768, 128)
+        self.dropout = nn.Dropout(0.3)
+    def forward(self, input_ids, attention_mask=None):
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = outputs.last_hidden_state[:, 0, :]
+        pooled = self.dropout(pooled)
+        return self.fc(pooled)
+
+class DomURLBERT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = AutoModel.from_pretrained("amahdaouy/DomURLs_BERT")
+        self.fc = nn.Linear(768, 128)
+        self.dropout = nn.Dropout(0.3)
+    def forward(self, input_ids, attention_mask=None):
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = outputs.last_hidden_state[:, 0, :]
+        pooled = self.dropout(pooled)
+        return self.fc(pooled)
+
+email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
+
+# Original Message Passing
+class OriginalMessagePassing(nn.Module):
+    def __init__(self, rounds=2):
+        super().__init__()
+        self.rounds = rounds
+        self.update_e = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
+        self.update_u = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
+        self.fc = nn.Linear(256, 1)
+    def forward(self, e, u):
+        for _ in range(self.rounds):
+            e = self.update_e(torch.cat([e, u], dim=1))
+            u = self.update_u(torch.cat([u, e], dim=1))
+        return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
+
+# PPO Dynamic Weighting Version
+class PPODynamicWeight(nn.Module):
+    def __init__(self, dim=128):
+        super().__init__()
+        self.fc = nn.Sequential(nn.Linear(dim*2, 64), nn.ReLU(), nn.Dropout(0.3), nn.Linear(64, 2))
+    def forward(self, e, u):
+        x = torch.cat([e, u], dim=1)
+        return torch.softmax(self.fc(x), dim=1)
+
+class PPO_MessagePassing(nn.Module):
+    def __init__(self, rounds=2):
+        super().__init__()
+        self.rounds = rounds
+        self.update_e = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
+        self.update_u = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
+        self.ppo_weight = PPODynamicWeight()
+        self.fc = nn.Linear(256, 1)
+    def forward(self, e, u):
+        for _ in range(self.rounds):
+            e = self.update_e(torch.cat([e, u], dim=1))
+            u = self.update_u(torch.cat([u, e], dim=1))
+        weights = self.ppo_weight(e, u)
+        fused = weights[:, 0:1] * e + weights[:, 1:2] * u
+        comm = torch.cat([e, fused], dim=1)
+        return self.fc(comm).squeeze(-1)
+
+# ====================== TRAINING FUNCTION ======================
+def train_model(model_class, name):
+    print(f"\nTraining {name}...")
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    fold_f1 = []
+    
+    for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
+        train_df = df.iloc[train_idx].reset_index(drop=True)
+        val_df = df.iloc[val_idx].reset_index(drop=True)
+
+        email_model = DistilBertWrapper().to(device)
+        url_model = DomURLBERT().to(device)
+        comm_model = model_class().to(device)
+
+        optimizer = optim.AdamW(
+            list(email_model.parameters()) + list(url_model.parameters()) + list(comm_model.parameters()),
+            lr=8e-6, weight_decay=0.08
+        )
+        criterion = nn.BCEWithLogitsLoss()
+
+        # Training
+        for epoch in range(25):
+            comm_model.train()
+            for i in range(0, len(train_df), 8):
+                batch = train_df.iloc[i:i+8]
+                labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+                e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+                u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+                e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+                u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+                logits = comm_model(e_feat, u_feat)
+                loss = criterion(logits, labels)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # Evaluation
+        comm_model.eval()
+        y_true, y_prob = [], []
+        with torch.no_grad():
+            for i in range(0, len(val_df), 8):
+                batch = val_df.iloc[i:i+8]
+                e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+                u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+                e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+                u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+                logits = comm_model(e_feat, u_feat)
+                prob = logits.sigmoid().cpu().numpy()
+                y_true.extend(batch['label'].values)
+                y_prob.extend(prob)
+        y_pred = (np.array(y_prob) > 0.5).astype(int)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        fold_f1.append(f1)
+        print(f"  Fold {fold+1} F1: {f1:.4f}")
+
+    avg_f1 = np.mean(fold_f1)
+    print(f"{name} Average F1: {avg_f1:.4f}")
+    return avg_f1
+
+# ====================== RUN COMPARISON ======================
+original_f1 = train_model(OriginalMessagePassing, "Original Message Passing (2 rounds)")
+ppo_f1 = train_model(PPO_MessagePassing, "PPO Dynamic Weighting + Message Passing")
+
+print("\n" + "="*70)
+print("FINAL COMPARISON")
+print("="*70)
+print(f"Original Message Passing : {original_f1:.4f}")
+print(f"PPO Dynamic Weighting    : {ppo_f1:.4f}")
+print(f"Difference               : {ppo_f1 - original_f1:.4f}")
+if ppo_f1 > original_f1:
+    print("→ PPO version is better")
+else:
+    print("→ Original is better or similar")
