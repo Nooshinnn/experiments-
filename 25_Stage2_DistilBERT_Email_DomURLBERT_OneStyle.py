@@ -25,7 +25,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # ====================== CONFIG - CHANGE ONLY THIS ======================
-communication_name = "Simple Concat"   # <<< CHANGE THIS LINE ONLY >>>
+communication_name = "Message Passing"   # <<< CHANGE THIS LINE ONLY >>>
 # Valid options: 
 # "No Communication", "Simple Concat", "Weighted Score", "Gated Fusion", 
 # "Cross Attention", "Message Passing"
