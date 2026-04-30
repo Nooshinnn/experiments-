@@ -1,0 +1,153 @@
+# File: 27_Adversarial_Retraining_FLAN_T5_Large.py
+import pandas as pd
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import T5ForConditionalGeneration, T5Tokenizer, AdamW, get_linear_schedule_with_warmup
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, matthews_corrcoef
+import numpy as np
+from tqdm import tqdm
+import warnings
+import gc
+
+warnings.filterwarnings("ignore")
+torch.manual_seed(42)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# ====================== CONFIG ======================
+model_name = "google/flan-t5-large"
+batch_size = 4          # Adjust based on your GPU (FLAN-T5-Large is heavy)
+epochs = 5
+lr = 3e-5
+max_length = 512
+mix_ratio = 0.5         # 50% original + 50% adversarial samples
+
+print(f"Starting Adversarial Training with {model_name}")
+
+# ====================== LOAD DATA ======================
+# Main training data (cybersectony or your main dataset)
+dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
+df_main = pd.DataFrame(dataset)
+df_main = df_main[df_main['label'].isin([0, 1])].reset_index(drop=True)
+df_main = df_main.rename(columns={"content": "email_text"})
+
+# Load your adversarial test set (for final evaluation)
+adv_df = pd.read_csv("llm_attack_outputs_flan_t5_large_normal.csv")
+adv_df = adv_df.rename(columns={"adv": "email_text"})  # adversarial emails
+adv_df = adv_df[adv_df['label'].isin([0, 1])].reset_index(drop=True)
+
+print(f"Main training samples: {len(df_main)}")
+print(f"Adversarial samples for mixing/eval: {len(adv_df)}")
+
+# ====================== PROMPT TEMPLATE (Normal Prompt) ======================
+prompt_template = """Classify the following email as phishing or legitimate.
+Email: {email}
+Answer (only "phishing" or "legitimate"): """
+
+def format_input(email):
+    return prompt_template.format(email=email)
+
+# ====================== CUSTOM DATASET ======================
+class PhishingDataset(Dataset):
+    def __init__(self, df, tokenizer, is_adversarial=False):
+        self.texts = df['email_text'].tolist()
+        self.labels = df['label'].tolist()
+        self.tokenizer = tokenizer
+        self.is_adversarial = is_adversarial
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        email = self.texts[idx]
+        label = "phishing" if self.labels[idx] == 1 else "legitimate"
+        
+        input_text = format_input(email)
+        target_text = label
+        
+        input_enc = self.tokenizer(input_text, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
+        target_enc = self.tokenizer(target_text, max_length=10, padding="max_length", truncation=True, return_tensors="pt")
+        
+        return {
+            "input_ids": input_enc.input_ids.squeeze(),
+            "attention_mask": input_enc.attention_mask.squeeze(),
+            "labels": target_enc.input_ids.squeeze()
+        }
+
+tokenizer = T5Tokenizer.from_pretrained(model_name)
+model = T5ForConditionalGeneration.from_pretrained(model_name).to(device)
+
+# Mix original + adversarial samples
+df_train = pd.concat([df_main, adv_df.sample(frac=mix_ratio, random_state=42)]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+train_dataset = PhishingDataset(df_train, tokenizer)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+# ====================== TRAINING ======================
+optimizer = AdamW(model.parameters(), lr=lr)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=len(train_loader)*epochs)
+
+model.train()
+for epoch in range(epochs):
+    total_loss = 0
+    progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+    
+    for batch in progress:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+        
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+        
+        total_loss += loss.item()
+        progress.set_postfix({"Loss": f"{total_loss/(progress.n+1):.4f}"})
+    
+    print(f"Epoch {epoch+1} completed. Avg Loss: {total_loss/len(train_loader):.4f}")
+
+# ====================== SAVE MODEL ======================
+model.save_pretrained("flan_t5_large_adversarial_phishing")
+tokenizer.save_pretrained("flan_t5_large_adversarial_phishing")
+print("\nModel saved to: flan_t5_large_adversarial_phishing/")
+
+# ====================== EVALUATION ON TEST SET ======================
+print("\n=== Evaluating on Adversarial Test Set ===")
+model.eval()
+
+def predict_email(email):
+    input_text = format_input(email)
+    inputs = tokenizer(input_text, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt").to(device)
+    
+    with torch.no_grad():
+        outputs = model.generate(inputs.input_ids, max_new_tokens=10, do_sample=False)
+    pred_text = tokenizer.decode(outputs[0], skip_special_tokens=True).strip().lower()
+    
+    return 1 if "phishing" in pred_text else 0
+
+y_true = adv_df['label'].tolist()
+y_pred = []
+
+for email in tqdm(adv_df['email_text'], desc="Predicting"):
+    y_pred.append(predict_email(email))
+
+# ====================== METRICS ======================
+metrics = {
+    "accuracy": accuracy_score(y_true, y_pred),
+    "f1": f1_score(y_true, y_pred, average='binary', zero_division=0),
+    "mcc": matthews_corrcoef(y_true, y_pred),
+    "roc_auc": roc_auc_score(y_true, y_pred) if len(set(y_true)) > 1 else 0.0,
+}
+
+print("\n=== Final Results on Adversarial Test Set ===")
+for k, v in metrics.items():
+    print(f"  {k.replace('_', ' ').title()}: {v:.4f}")
+
+pd.DataFrame([metrics]).to_csv("FLAN_T5_Adversarial_Results.csv", index=False)
+print("\nResults saved to FLAN_T5_Adversarial_Results.csv")
