@@ -18,10 +18,10 @@ random.seed(42)
 
 print("="*100)
 print("STRONG PDGAN ADVERSARIAL GENERATOR")
-print("Using your best strong baseline model")
+print("Using your best strong baseline (F1 ~0.993)")
 print("="*100)
 
-# ====================== STRONG BASELINE MODEL (Adapter version) ======================
+# ====================== YOUR STRONG BASELINE MODEL ======================
 class DistilBertEmail(nn.Module):
     def __init__(self):
         super().__init__()
@@ -69,7 +69,7 @@ email_model.load_state_dict(checkpoint['email_model'])
 url_model.load_state_dict(checkpoint['url_model'])
 comm_model.load_state_dict(checkpoint['comm_model'])
 
-# Freeze the discriminator (your strong model)
+# Freeze discriminator
 for p in list(email_model.parameters()) + list(url_model.parameters()) + list(comm_model.parameters()):
     p.requires_grad = False
 
@@ -77,13 +77,11 @@ email_model.eval()
 url_model.eval()
 comm_model.eval()
 
-print("✅ Strong baseline model loaded successfully.")
+print("✅ Strong baseline loaded successfully.")
 
 # ====================== TOKENIZERS ======================
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
-mlm_model = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased").to(device)
-mlm_model.eval()
 
 # ====================== DATASET ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
@@ -97,7 +95,6 @@ def extract_first_url(text):
 df['url'] = df['email_text'].apply(extract_first_url)
 df = df[df['url'] != ""].reset_index(drop=True)
 
-# Use a small test set for faster PDGAN training
 _, test_df = train_test_split(df, test_size=0.15, stratify=df['label'], random_state=42)
 test_df = test_df.reset_index(drop=True)
 
@@ -107,18 +104,18 @@ print(f"Using {len(test_df)} samples for PDGAN training.")
 class StrongPDGAN_Generator(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mlm = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased")
+        self.mlm = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased").to(device)
     
     def forward(self, input_ids, attention_mask=None):
         return self.mlm(input_ids=input_ids, attention_mask=attention_mask).logits
 
-generator = StrongPDGAN_Generator().to(device)
+generator = StrongPDGAN_Generator()
 g_optimizer = optim.Adam(generator.parameters(), lr=1e-5, betas=(0.5, 0.999))
 
-# ====================== TRAINING LOOP ======================
-print("\nStarting Strong PDGAN Training (Generator vs Frozen Strong Discriminator)...")
+# ====================== TRAINING ======================
+print("\nStarting Strong PDGAN Training...\n")
 
-for epoch in range(30):   # Increase if you have time
+for epoch in range(30):
     generator.train()
     total_g_loss = 0.0
     
@@ -126,28 +123,28 @@ for epoch in range(30):   # Increase if you have time
         batch = test_df.iloc[i:i+8]
         texts = batch['email_text'].tolist()
         
-        # Tokenize real emails
         inputs = email_tokenizer(texts, padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
         input_ids = inputs.input_ids
         
-        # Generate adversarial version (mask important tokens and let MLM fill)
+        # Create mask on the same device
         mask_prob = 0.25
-        mask = torch.rand(input_ids.shape) < mask_prob
+        mask = (torch.rand_like(input_ids, dtype=torch.float32) < mask_prob).to(device)
         mask = mask & (input_ids != email_tokenizer.pad_token_id)
+        
         input_ids_masked = input_ids.clone()
         input_ids_masked[mask] = email_tokenizer.mask_token_id
         
-        # Generator prediction
+        # Generator forward
         gen_logits = generator(input_ids_masked, inputs.attention_mask)
         
         # Sample tokens
         with torch.no_grad():
             fake_ids = gen_logits.argmax(dim=-1)
-            fake_ids[~mask] = input_ids[~mask]   # Keep original non-masked tokens
+            fake_ids[~mask] = input_ids[~mask]   # Keep original tokens
         
         fake_texts = email_tokenizer.batch_decode(fake_ids, skip_special_tokens=True)
         
-        # Get discriminator score on fake samples
+        # Discriminator score
         e_in = email_tokenizer(fake_texts, padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
         u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
         
@@ -156,7 +153,7 @@ for epoch in range(30):   # Increase if you have time
         d_output = comm_model(e_feat, u_feat)
         d_prob = torch.sigmoid(d_output)
         
-        # Generator loss - fool the strong discriminator
+        # Generator loss
         g_loss = -torch.mean(torch.log(d_prob + 1e-8))
         
         g_optimizer.zero_grad()
@@ -166,8 +163,7 @@ for epoch in range(30):   # Increase if you have time
         
         total_g_loss += g_loss.item()
     
-    avg_loss = total_g_loss / (len(test_df) // 8 + 1)
-    print(f"Epoch {epoch+1} | G Loss: {avg_loss:.4f}")
+    print(f"Epoch {epoch+1} | G Loss: {total_g_loss / (len(test_df)//8 + 1):.4f}")
 
 torch.save(generator.state_dict(), "strong_pdg an_generator.pth")
-print("\n✅ Strong PDGAN Generator training completed and saved!")
+print("\n✅ Strong PDGAN Generator training finished and saved!")
