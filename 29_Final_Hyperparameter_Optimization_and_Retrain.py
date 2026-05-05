@@ -10,10 +10,11 @@ from tqdm import tqdm
 import optuna
 from pyswarm import pso
 import gc
+import os
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModel
 from sklearn.model_selection import KFold
-from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef, roc_auc_score
+from sklearn.metrics import f1_score
 
 warnings.filterwarnings("ignore")
 torch.manual_seed(42)
@@ -23,7 +24,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # ====================== LOAD DATA WITH CLEAN PAIRING ======================
-print("Loading dataset with clean pairing...")
+print("Loading dataset...")
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['label'].isin([0, 1])].reset_index(drop=True)
@@ -90,10 +91,12 @@ class MessagePassing(nn.Module):
             e, u = e_new, u_new
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# ====================== TRAINING FUNCTION WITH EARLY STOPPING ======================
-def train_with_params(params, n_folds=5, max_epochs=30, patience=5, batch_size=8):
+# ====================== TRAINING FUNCTION ======================
+def train_with_params(params, n_folds=5, max_epochs=30, patience=5, batch_size=8, save_model=False):
     kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
     fold_f1 = []
+    best_model_state = None
+    best_f1 = 0.0
     
     for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
         print(f"   Fold {fold+1}/{n_folds}")
@@ -119,7 +122,7 @@ def train_with_params(params, n_folds=5, max_epochs=30, patience=5, batch_size=8
             comm_model.train()
             train_loss = 0.0
             
-            for i in tqdm(range(0, len(train_df), batch_size), desc=f"Epoch {epoch+1}", leave=False):
+            for i in tqdm(range(0, len(train_df), batch_size), desc=f"Fold {fold+1} Epoch {epoch+1}", leave=False):
                 batch = train_df.iloc[i:i+batch_size]
                 labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
                 
@@ -171,62 +174,91 @@ def train_with_params(params, n_folds=5, max_epochs=30, patience=5, batch_size=8
                 y_true.extend(batch['label'].values)
                 y_pred.extend(pred)
         
-        fold_f1.append(f1_score(y_true, y_pred))
+        current_f1 = f1_score(y_true, y_pred)
+        fold_f1.append(current_f1)
+        
+        # Save best fold model
+        if current_f1 > best_f1 and save_model:
+            best_f1 = current_f1
+            best_model_state = {
+                'email_model': email_model.state_dict(),
+                'url_model': url_model.state_dict(),
+                'comm_model': comm_model.state_dict(),
+                'params': params
+            }
         
         del email_model, url_model, comm_model
         gc.collect()
         torch.cuda.empty_cache()
     
-    return np.mean(fold_f1)
+    mean_f1 = np.mean(fold_f1)
+    
+    # Save the best model from all folds
+    if save_model and best_model_state:
+        save_dir = "best_optimized_phishing_model"
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(best_model_state['email_model'], f"{save_dir}/email_model.pth")
+        torch.save(best_model_state['url_model'], f"{save_dir}/url_model.pth")
+        torch.save(best_model_state['comm_model'], f"{save_dir}/comm_model.pth")
+        torch.save(best_model_state['params'], f"{save_dir}/best_params.pth")
+        print(f"\nBest model saved to folder: ./{save_dir}/")
+    
+    return mean_f1
 
-# ====================== OPTIMIZATION ======================
+# ====================== HYPERPARAMETER OPTIMIZATION ======================
 print("=== Starting Hyperparameter Optimization ===")
 
-# 1. Optuna
+# Optuna
 def objective(trial):
     params = {
         "lr": trial.suggest_float("lr", 1e-6, 5e-5, log=True),
         "dropout": trial.suggest_float("dropout", 0.1, 0.5),
-        "batch_size": 8,                    # fixed as per your request
+        "batch_size": 8,
         "mp_rounds": trial.suggest_int("mp_rounds", 1, 4),
         "weight_decay": trial.suggest_float("weight_decay", 1e-5, 0.1, log=True)
     }
-    return train_with_params(params, n_folds=3, max_epochs=6, patience=3, batch_size=8)  # fast inner eval
+    return train_with_params(params, n_folds=3, max_epochs=8, patience=3, batch_size=8)
 
 study = optuna.create_study(direction="maximize")
 study.optimize(objective, n_trials=25)
 optuna_params = study.best_params
 print(f"Best Optuna Params: {optuna_params}")
 
-# 2. PSO (simplified)
+# PSO
 def pso_obj(x):
     params = {
         "lr": x[0], "dropout": x[1], "mp_rounds": int(x[2]),
         "weight_decay": x[3], "batch_size": 8
     }
-    return -train_with_params(params, n_folds=3, max_epochs=6, patience=3, batch_size=8)
+    return -train_with_params(params, n_folds=3, max_epochs=8, patience=3, batch_size=8)
 
 lb = [1e-6, 0.1, 1, 1e-5]
 ub = [5e-5, 0.5, 4, 0.1]
-xopt, fopt = pso(pso_obj, lb, ub, swarmsize=15, maxiter=12)
+xopt, fopt = pso(pso_obj, lb, ub, swarmsize=12, maxiter=10)
 pso_params = {"lr": xopt[0], "dropout": xopt[1], "mp_rounds": int(xopt[2]), "weight_decay": xopt[3], "batch_size": 8}
-print(f"Best PSO Params: {pso_params}")
 
-# Choose the best parameters
+# Select best parameters
 final_params = optuna_params if study.best_value > -fopt else pso_params
 print(f"\nSelected Best Parameters: {final_params}")
 
-# ====================== FINAL RETRAIN WITH BEST PARAMS ======================
+# ====================== FINAL FULL RETRAIN & SAVE MODEL ======================
 print("\n=== Final Retraining with Best Parameters (5-Fold, Full Training) ===")
-final_f1 = train_with_params(final_params, n_folds=5, max_epochs=30, patience=5, batch_size=8)
+final_f1 = train_with_params(
+    final_params,
+    n_folds=5,
+    max_epochs=30,
+    patience=5,
+    batch_size=8,
+    save_model=True          # ← Saves the model
+)
 
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("FINAL RESULTS")
-print("="*60)
+print("="*70)
 print(f"Best Hyperparameters : {final_params}")
 print(f"Final 5-Fold F1 Score : {final_f1:.4f}")
-print("="*60)
+print("="*70)
 
-# Save
 pd.DataFrame([final_params]).to_csv("Best_Final_Parameters.csv", index=False)
-print("Best parameters saved to Best_Final_Parameters.csv")
+print("Parameters saved to Best_Final_Parameters.csv")
+print("Trained model saved to folder: best_optimized_phishing_model/")
