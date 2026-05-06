@@ -1,0 +1,256 @@
+# File: 32_Continual_FineTuning_Comparison_Old_vs_New.py
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+import warnings
+from tqdm import tqdm
+import gc
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef, roc_auc_score
+from transformers import AutoTokenizer, AutoModel
+from datasets import load_dataset
+
+warnings.filterwarnings("ignore")
+torch.manual_seed(42)
+np.random.seed(42)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+print("=" * 100)
+print("CONTINUAL FINE-TUNING + COMPARISON")
+print("Old Model (cybersectony) vs New Fine-tuned Model")
+print("=" * 100)
+
+# ====================== LOAD OLD BEST MODEL ======================
+print("\nLoading old best trained model...")
+model_dir = "best_trained_model"
+
+class DistilBertEmail(nn.Module):
+    def __init__(self, dropout=0.3):
+        super().__init__()
+        self.model = AutoModel.from_pretrained("distilbert-base-uncased")
+        self.adapter = nn.Sequential(nn.Linear(768, 192), nn.ReLU(), nn.Dropout(dropout), nn.Linear(192, 128))
+    def forward(self, input_ids, attention_mask):
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        return self.adapter(outputs.last_hidden_state[:, 0, :])
+
+class DomURLBERT(nn.Module):
+    def __init__(self, dropout=0.3):
+        super().__init__()
+        self.model = AutoModel.from_pretrained("amahdaouy/DomURLs_BERT")
+        self.adapter = nn.Sequential(nn.Linear(768, 192), nn.ReLU(), nn.Dropout(dropout), nn.Linear(192, 128))
+    def forward(self, input_ids, attention_mask):
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        return self.adapter(outputs.last_hidden_state[:, 0, :])
+
+class MessagePassing(nn.Module):
+    def __init__(self, rounds=2):
+        super().__init__()
+        self.rounds = rounds
+        self.update_e = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
+        self.update_u = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3))
+        self.fc = nn.Linear(256, 1)
+    def forward(self, e, u):
+        for _ in range(self.rounds):
+            e = self.update_e(torch.cat([e, u], dim=1))
+            u = self.update_u(torch.cat([u, e], dim=1))
+        return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
+
+old_email = DistilBertEmail().to(device)
+old_url = DomURLBERT().to(device)
+old_comm = MessagePassing(rounds=2).to(device)
+
+old_email.load_state_dict(torch.load(f"{model_dir}/email_model.pth", map_location=device))
+old_url.load_state_dict(torch.load(f"{model_dir}/url_model.pth", map_location=device))
+old_comm.load_state_dict(torch.load(f"{model_dir}/comm_model.pth", map_location=device))
+
+print("Old model loaded successfully.")
+
+# ====================== LOAD NEW DATASETS ======================
+print("\nLoading new datasets (final_emails & final_urls)...")
+email_df = pd.read_csv("final_emails.csv")
+email_df['email_text'] = email_df.apply(
+    lambda row: f"Sender: {row.get('sender', '')}\nSubject: {row.get('subject', '')}\n\n{row.get('email body', row.get('body', ''))}", 
+    axis=1
+)
+email_df = email_df[['email_text', 'label']].copy()
+
+url_df = pd.read_csv("final_urls.csv")
+url_df = url_df.rename(columns={"url": "url"})
+
+print(f"New Email samples: {len(email_df)} | New URL samples: {len(url_df)}")
+
+# ====================== CREATE PAIRED TRAIN/VAL/TEST ======================
+min_size = min(len(email_df), len(url_df))
+email_s = email_df.sample(n=min_size, random_state=42).reset_index(drop=True)
+url_s = url_df.sample(n=min_size, random_state=42).reset_index(drop=True)
+
+paired = pd.DataFrame({
+    'email_text': email_s['email_text'],
+    'url': url_s['url'],
+    'label': email_s['label']
+})
+
+train_df, temp = train_test_split(paired, test_size=0.3, stratify=paired['label'], random_state=42)
+val_df, new_test_df = train_test_split(temp, test_size=0.5, stratify=temp['label'], random_state=42)
+
+print(f"Train: {len(train_df)} | Val: {len(val_df)} | New Test: {len(new_test_df)}")
+
+# ====================== LOAD OLD TEST SET (from Hugging Face) ======================
+print("\nLoading old test set from cybersectony dataset...")
+old_dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
+old_df = pd.DataFrame(old_dataset)
+old_df = old_df.rename(columns={"content": "email_text", "labels": "label"})
+old_df = old_df[old_df['label'].isin([0, 1])].reset_index(drop=True)
+
+# Simple URL pairing for old test set
+def extract_url(text):
+    import re
+    urls = re.findall(r'https?://\S+', str(text))
+    return urls[0] if urls else None
+
+old_df['url'] = old_df['email_text'].apply(extract_url)
+old_df = old_df[old_df['url'].notna()].reset_index(drop=True)
+
+_, old_test_df = train_test_split(old_df, test_size=0.2, stratify=old_df['label'], random_state=42)
+old_test_df = old_test_df.reset_index(drop=True)
+print(f"Old Test Set size: {len(old_test_df)}")
+
+email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
+
+# ====================== CONTINUAL FINE-TUNING ======================
+print("\nStarting Continual Fine-Tuning...")
+
+email_model = DistilBertEmail().to(device)
+url_model = DomURLBERT().to(device)
+comm_model = MessagePassing(rounds=2).to(device)
+
+# Load old weights for continual learning
+email_model.load_state_dict(old_email.state_dict())
+url_model.load_state_dict(old_url.state_dict())
+comm_model.load_state_dict(old_comm.state_dict())
+
+optimizer = optim.AdamW(
+    list(email_model.parameters()) + list(url_model.parameters()) + list(comm_model.parameters()),
+    lr=3e-5, weight_decay=0.05
+)
+criterion = nn.BCEWithLogitsLoss()
+
+best_val_loss = float('inf')
+patience = 5
+patience_counter = 0
+batch_size = 8
+
+for epoch in range(20):
+    email_model.train()
+    url_model.train()
+    comm_model.train()
+    train_loss = 0.0
+    
+    for i in tqdm(range(0, len(train_df), batch_size), desc=f"Epoch {epoch+1}"):
+        batch = train_df.iloc[i:i+batch_size]
+        labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+        
+        e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+        u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+        
+        e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+        u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+        logits = comm_model(e_feat, u_feat)
+        loss = criterion(logits, labels)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(email_model.parameters()) + list(url_model.parameters()) + list(comm_model.parameters()), 1.0)
+        optimizer.step()
+        train_loss += loss.item()
+    
+    # Validation Loss
+    email_model.eval()
+    url_model.eval()
+    comm_model.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for i in range(0, len(val_df), batch_size):
+            batch = val_df.iloc[i:i+batch_size]
+            labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+            e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+            u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+            e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+            u_feat = url_model(u_in.input_ids, u_in.attention_mask)
+            logits = comm_model(e_feat, u_feat)
+            val_loss += criterion(logits, labels).item()
+    
+    avg_val_loss = val_loss / (len(val_df) // batch_size + 1)
+    print(f"Epoch {epoch+1:2d} | Val Loss: {avg_val_loss:.4f}")
+    
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        patience_counter = 0
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            print("Early stopping triggered based on Validation Loss")
+            break
+
+# ====================== SAVE NEW MODEL ======================
+save_dir = "continual_finetuned_model"
+os.makedirs(save_dir, exist_ok=True)
+torch.save(email_model.state_dict(), f"{save_dir}/email_model.pth")
+torch.save(url_model.state_dict(), f"{save_dir}/url_model.pth")
+torch.save(comm_model.state_dict(), f"{save_dir}/comm_model.pth")
+print(f"\nNew fine-tuned model saved to: {save_dir}/")
+
+# ====================== COMPARISON ======================
+print("\n" + "="*90)
+print("FINAL COMPARISON: Old Model vs New Fine-tuned Model")
+print("="*90)
+
+def evaluate(model_e, model_u, model_c, df_eval):
+    model_e.eval()
+    model_u.eval()
+    model_c.eval()
+    y_true, y_prob = [], []
+    with torch.no_grad():
+        for i in range(0, len(df_eval), 8):
+            batch = df_eval.iloc[i:i+8]
+            e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+            u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+            e_feat = model_e(e_in.input_ids, e_in.attention_mask)
+            u_feat = model_u(u_in.input_ids, u_in.attention_mask)
+            logits = model_c(e_feat, u_feat)
+            prob = torch.sigmoid(logits).cpu().numpy()
+            y_true.extend(batch['label'].values)
+            y_prob.extend(prob)
+    y_true = np.array(y_true)
+    y_prob = np.array(y_prob)
+    y_pred = (y_prob > 0.5).astype(int)
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+        "mcc": matthews_corrcoef(y_true, y_pred)
+    }
+
+print("On OLD Test Set (cybersectony):")
+old_on_old = evaluate(old_email, old_url, old_comm, old_test_df)
+new_on_old = evaluate(email_model, url_model, comm_model, old_test_df)
+
+print("On NEW Test Set (final_emails + final_urls):")
+old_on_new = evaluate(old_email, old_url, old_comm, new_test_df)
+new_on_new = evaluate(email_model, url_model, comm_model, new_test_df)
+
+print(f"{'Dataset':<20} {'Metric':<10} {'Old Model':<10} {'New Model':<10} {'Change'}")
+print("-" * 65)
+for name, old_m, new_m in [("Old Test Set", old_on_old, new_on_old), 
+                           ("New Test Set", old_on_new, new_on_new)]:
+    for metric in ['accuracy', 'f1', 'mcc']:
+        change = new_m[metric] - old_m[metric]
+        print(f"{name:<20} {metric:<10} {old_m[metric]:.4f}    {new_m[metric]:.4f}    {'+' if change >= 0 else ''}{change:.4f}")
+
+print("\nComparison completed!")
