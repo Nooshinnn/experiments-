@@ -1,4 +1,3 @@
-# File: 32_Continual_FineTuning_Comparison_Old_vs_New.py
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -6,47 +5,88 @@ import torch.optim as optim
 import numpy as np
 import random
 import warnings
-from tqdm import tqdm
-import gc
+import re
+import json
 import os
+from tqdm import tqdm
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score, f1_score, matthews_corrcoef, roc_auc_score,
+    precision_score, recall_score, confusion_matrix, log_loss,
+    brier_score_loss, roc_curve, precision_recall_curve,
+    average_precision_score, cohen_kappa_score, classification_report
+)
+from sklearn.calibration import calibration_curve
 from transformers import AutoTokenizer, AutoModel
 from datasets import load_dataset
 
 warnings.filterwarnings("ignore")
 torch.manual_seed(42)
 np.random.seed(42)
+random.seed(42)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+# ====================== PLOT CONFIG ======================
+PLOT_DIR = "plots_continual_finetuning"
+os.makedirs(PLOT_DIR, exist_ok=True)
+
+PALETTE = {
+    "old_model":  "#C44E52",
+    "new_model":  "#4C72B0",
+    "train":      "#4C72B0",
+    "val":        "#DD8452",
+    "test_old":   "#C44E52",
+    "test_new":   "#55A868",
+    "phish":      "#C44E52",
+    "legit":      "#4C72B0",
+    "gain":       "#2ecc71",
+    "loss_col":   "#e74c3c",
+}
+plt.rcParams.update({
+    "figure.dpi": 150,
+    "font.family": "DejaVu Sans",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.titlesize": 13,
+    "axes.labelsize": 11,
+})
 
 print("=" * 100)
 print("CONTINUAL FINE-TUNING + COMPARISON")
 print("Old Model (cybersectony) vs New Fine-tuned Model")
 print("=" * 100)
 
-# ====================== LOAD OLD BEST MODEL ======================
-print("\nLoading old best trained model...")
-model_dir = "best_trained_model"
-
+# ====================== MODEL DEFINITIONS ======================
 class DistilBertEmail(nn.Module):
     def __init__(self, dropout=0.3):
         super().__init__()
         self.model = AutoModel.from_pretrained("distilbert-base-uncased")
-        self.adapter = nn.Sequential(nn.Linear(768, 192), nn.ReLU(), nn.Dropout(dropout), nn.Linear(192, 128))
+        self.adapter = nn.Sequential(
+            nn.Linear(768, 192), nn.ReLU(), nn.Dropout(dropout), nn.Linear(192, 128)
+        )
     def forward(self, input_ids, attention_mask):
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        return self.adapter(outputs.last_hidden_state[:, 0, :])
+        out = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        return self.adapter(out.last_hidden_state[:, 0, :])
+
 
 class DomURLBERT(nn.Module):
     def __init__(self, dropout=0.3):
         super().__init__()
         self.model = AutoModel.from_pretrained("amahdaouy/DomURLs_BERT")
-        self.adapter = nn.Sequential(nn.Linear(768, 192), nn.ReLU(), nn.Dropout(dropout), nn.Linear(192, 128))
+        self.adapter = nn.Sequential(
+            nn.Linear(768, 192), nn.ReLU(), nn.Dropout(dropout), nn.Linear(192, 128)
+        )
     def forward(self, input_ids, attention_mask):
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        return self.adapter(outputs.last_hidden_state[:, 0, :])
+        out = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        return self.adapter(out.last_hidden_state[:, 0, :])
+
 
 class MessagePassing(nn.Module):
     def __init__(self, rounds=2):
@@ -61,196 +101,755 @@ class MessagePassing(nn.Module):
             u = self.update_u(torch.cat([u, e], dim=1))
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
+
+# ====================== LOAD OLD MODEL ======================
+print("\nLoading old best trained model...")
+model_dir = "best_trained_model"
+
 old_email = DistilBertEmail().to(device)
-old_url = DomURLBERT().to(device)
-old_comm = MessagePassing(rounds=2).to(device)
-
+old_url   = DomURLBERT().to(device)
+old_comm  = MessagePassing(rounds=2).to(device)
 old_email.load_state_dict(torch.load(f"{model_dir}/email_model.pth", map_location=device))
-old_url.load_state_dict(torch.load(f"{model_dir}/url_model.pth", map_location=device))
+old_url.load_state_dict(torch.load(f"{model_dir}/url_model.pth",   map_location=device))
 old_comm.load_state_dict(torch.load(f"{model_dir}/comm_model.pth", map_location=device))
-
 print("Old model loaded successfully.")
 
 # ====================== LOAD NEW DATASETS ======================
 print("\nLoading new datasets (final_emails & final_urls)...")
 email_df = pd.read_csv("final_emails.csv")
 email_df['email_text'] = email_df.apply(
-    lambda row: f"Sender: {row.get('sender', '')}\nSubject: {row.get('subject', '')}\n\n{row.get('email body', row.get('body', ''))}", 
+    lambda row: f"Sender: {row.get('sender', '')}\n"
+                f"Subject: {row.get('subject', '')}\n\n"
+                f"{row.get('email body', row.get('body', ''))}",
     axis=1
 )
 email_df = email_df[['email_text', 'label']].copy()
+email_df = email_df[email_df['label'].isin([0, 1])].reset_index(drop=True)
 
 url_df = pd.read_csv("final_urls.csv")
-url_df = url_df.rename(columns={"url": "url"})
-
+url_df = url_df[url_df['label'].isin([0, 1])].reset_index(drop=True)
 print(f"New Email samples: {len(email_df)} | New URL samples: {len(url_df)}")
 
-# ====================== CREATE PAIRED TRAIN/VAL/TEST ======================
-min_size = min(len(email_df), len(url_df))
-email_s = email_df.sample(n=min_size, random_state=42).reset_index(drop=True)
-url_s = url_df.sample(n=min_size, random_state=42).reset_index(drop=True)
+# ---- Plot 1: Dataset overview ----
+def plot_dataset_overview(email_df, url_df):
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, df, title in zip(axes,
+                              [email_df, url_df],
+                              ["New Email Dataset", "New URL Dataset"]):
+        counts = df['label'].value_counts().sort_index()
+        bars = ax.bar(["Legitimate (0)", "Phishing (1)"],
+                      counts.values,
+                      color=[PALETTE["legit"], PALETTE["phish"]],
+                      edgecolor="white", width=0.5)
+        for bar, v in zip(bars, counts.values):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + counts.max() * 0.01,
+                    f"{v:,}\n({v/len(df)*100:.1f}%)",
+                    ha='center', va='bottom', fontsize=10)
+        ax.set_title(title, fontweight='bold')
+        ax.set_ylabel("Sample Count")
+        ax.set_ylim(0, counts.max() * 1.18)
+    plt.suptitle("Class Distribution — New Training Datasets",
+                 fontsize=14, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/01_dataset_overview.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 01_dataset_overview.png")
+
+plot_dataset_overview(email_df, url_df)
+
+# ====================== SPLIT ======================
+min_size  = min(len(email_df), len(url_df))
+email_s   = email_df.sample(n=min_size, random_state=42).reset_index(drop=True)
+url_s     = url_df.sample(n=min_size, random_state=42).reset_index(drop=True)
 
 paired = pd.DataFrame({
     'email_text': email_s['email_text'],
-    'url': url_s['url'],
-    'label': email_s['label']
+    'url':        url_s['url'],
+    'label':      email_s['label']
 })
 
-train_df, temp = train_test_split(paired, test_size=0.3, stratify=paired['label'], random_state=42)
-val_df, new_test_df = train_test_split(temp, test_size=0.5, stratify=temp['label'], random_state=42)
+train_df, temp     = train_test_split(paired, test_size=0.3, stratify=paired['label'], random_state=42)
+val_df,   new_test = train_test_split(temp,   test_size=0.5, stratify=temp['label'],   random_state=42)
+print(f"Train: {len(train_df)} | Val: {len(val_df)} | New Test: {len(new_test)}")
 
-print(f"Train: {len(train_df)} | Val: {len(val_df)} | New Test: {len(new_test_df)}")
-
-# ====================== LOAD OLD TEST SET (from Hugging Face) ======================
+# ====================== OLD TEST SET ======================
 print("\nLoading old test set from cybersectony dataset...")
 old_dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 old_df = pd.DataFrame(old_dataset)
 old_df = old_df.rename(columns={"content": "email_text", "labels": "label"})
 old_df = old_df[old_df['label'].isin([0, 1])].reset_index(drop=True)
 
-# Simple URL pairing for old test set
 def extract_url(text):
-    import re
     urls = re.findall(r'https?://\S+', str(text))
     return urls[0] if urls else None
 
 old_df['url'] = old_df['email_text'].apply(extract_url)
 old_df = old_df[old_df['url'].notna()].reset_index(drop=True)
 
-_, old_test_df = train_test_split(old_df, test_size=0.2, stratify=old_df['label'], random_state=42)
-old_test_df = old_test_df.reset_index(drop=True)
-print(f"Old Test Set size: {len(old_test_df)}")
+_, old_test = train_test_split(old_df, test_size=0.2, stratify=old_df['label'], random_state=42)
+old_test = old_test.reset_index(drop=True)
+print(f"Old Test Set size: {len(old_test)}")
 
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
+url_tokenizer   = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== CONTINUAL FINE-TUNING ======================
-print("\nStarting Continual Fine-Tuning...")
+# ====================== EXTENDED METRICS ======================
+def compute_all_metrics(y_true, y_pred, y_prob, label=""):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    total = tn + fp + fn + tp
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    npv         = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+    fpr_val     = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    fnr_val     = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+    fdr         = fp / (fp + tp) if (fp + tp) > 0 else 0.0
 
-email_model = DistilBertEmail().to(device)
-url_model = DomURLBERT().to(device)
-comm_model = MessagePassing(rounds=2).to(device)
+    m = {
+        "Accuracy":         accuracy_score(y_true, y_pred),
+        "Precision":        precision_score(y_true, y_pred, zero_division=0),
+        "Recall (Sens.)":   recall_score(y_true, y_pred, zero_division=0),
+        "Specificity":      specificity,
+        "F1-Score":         f1_score(y_true, y_pred, zero_division=0),
+        "MCC":              matthews_corrcoef(y_true, y_pred),
+        "Cohen's Kappa":    cohen_kappa_score(y_true, y_pred),
+        "ROC-AUC":          roc_auc_score(y_true, y_prob),
+        "Avg Precision":    average_precision_score(y_true, y_prob),
+        "Log Loss":         log_loss(y_true, y_prob),
+        "Brier Score":      brier_score_loss(y_true, y_prob),
+        "NPV":              npv,
+        "FPR":              fpr_val,
+        "FNR":              fnr_val,
+        "FDR":              fdr,
+        "TP":               int(tp),
+        "TN":               int(tn),
+        "FP":               int(fp),
+        "FN":               int(fn),
+        "Prevalence":       (tp + fn) / total,
+    }
+    if label:
+        print(f"\n{'='*60}\n  {label}\n{'='*60}")
+        for k, v in m.items():
+            print(f"  {k:<20}: {v:.4f}" if isinstance(v, float) else f"  {k:<20}: {v}")
+    return m
 
-# Load old weights for continual learning
-email_model.load_state_dict(old_email.state_dict())
-url_model.load_state_dict(old_url.state_dict())
-comm_model.load_state_dict(old_comm.state_dict())
 
-optimizer = optim.AdamW(
-    list(email_model.parameters()) + list(url_model.parameters()) + list(comm_model.parameters()),
-    lr=3e-5, weight_decay=0.05
-)
-criterion = nn.BCEWithLogitsLoss()
-
-best_val_loss = float('inf')
-patience = 5
-patience_counter = 0
-batch_size = 8
-
-for epoch in range(20):
-    email_model.train()
-    url_model.train()
-    comm_model.train()
-    train_loss = 0.0
-    
-    for i in tqdm(range(0, len(train_df), batch_size), desc=f"Epoch {epoch+1}"):
-        batch = train_df.iloc[i:i+batch_size]
-        labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
-        
-        e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
-        u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
-        
-        e_feat = email_model(e_in.input_ids, e_in.attention_mask)
-        u_feat = url_model(u_in.input_ids, u_in.attention_mask)
-        logits = comm_model(e_feat, u_feat)
-        loss = criterion(logits, labels)
-        
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(email_model.parameters()) + list(url_model.parameters()) + list(comm_model.parameters()), 1.0)
-        optimizer.step()
-        train_loss += loss.item()
-    
-    # Validation Loss
-    email_model.eval()
-    url_model.eval()
-    comm_model.eval()
-    val_loss = 0.0
-    with torch.no_grad():
-        for i in range(0, len(val_df), batch_size):
-            batch = val_df.iloc[i:i+batch_size]
-            labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
-            e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
-            u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
-            e_feat = email_model(e_in.input_ids, e_in.attention_mask)
-            u_feat = url_model(u_in.input_ids, u_in.attention_mask)
-            logits = comm_model(e_feat, u_feat)
-            val_loss += criterion(logits, labels).item()
-    
-    avg_val_loss = val_loss / (len(val_df) // batch_size + 1)
-    print(f"Epoch {epoch+1:2d} | Val Loss: {avg_val_loss:.4f}")
-    
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        patience_counter = 0
-    else:
-        patience_counter += 1
-        if patience_counter >= patience:
-            print("Early stopping triggered based on Validation Loss")
-            break
-
-# ====================== SAVE NEW MODEL ======================
-save_dir = "continual_finetuned_model"
-os.makedirs(save_dir, exist_ok=True)
-torch.save(email_model.state_dict(), f"{save_dir}/email_model.pth")
-torch.save(url_model.state_dict(), f"{save_dir}/url_model.pth")
-torch.save(comm_model.state_dict(), f"{save_dir}/comm_model.pth")
-print(f"\nNew fine-tuned model saved to: {save_dir}/")
-
-# ====================== COMPARISON ======================
-print("\n" + "="*90)
-print("FINAL COMPARISON: Old Model vs New Fine-tuned Model")
-print("="*90)
-
-def evaluate(model_e, model_u, model_c, df_eval):
-    model_e.eval()
-    model_u.eval()
-    model_c.eval()
+def run_inference(model_e, model_u, model_c, df_eval, batch_size=8):
+    """Returns (y_true, y_pred, y_prob) ndarrays."""
+    model_e.eval(); model_u.eval(); model_c.eval()
     y_true, y_prob = [], []
     with torch.no_grad():
-        for i in range(0, len(df_eval), 8):
-            batch = df_eval.iloc[i:i+8]
-            e_in = email_tokenizer(batch['email_text'].tolist(), padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
-            u_in = url_tokenizer(batch['url'].tolist(), padding=True, truncation=True, max_length=128, return_tensors="pt").to(device)
+        for i in range(0, len(df_eval), batch_size):
+            batch  = df_eval.iloc[i:i + batch_size]
+            e_in   = email_tokenizer(batch['email_text'].tolist(), padding=True,
+                                     truncation=True, max_length=256,
+                                     return_tensors="pt").to(device)
+            u_in   = url_tokenizer(batch['url'].tolist(), padding=True,
+                                   truncation=True, max_length=128,
+                                   return_tensors="pt").to(device)
             e_feat = model_e(e_in.input_ids, e_in.attention_mask)
-            u_feat = model_u(u_in.input_ids, u_in.attention_mask)
+            u_feat = model_u(u_in.input_ids,  u_in.attention_mask)
             logits = model_c(e_feat, u_feat)
-            prob = torch.sigmoid(logits).cpu().numpy()
+            prob   = torch.sigmoid(logits).cpu().numpy()
             y_true.extend(batch['label'].values)
             y_prob.extend(prob)
     y_true = np.array(y_true)
     y_prob = np.array(y_prob)
     y_pred = (y_prob > 0.5).astype(int)
-    return {
-        "accuracy": accuracy_score(y_true, y_pred),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "mcc": matthews_corrcoef(y_true, y_pred)
-    }
+    return y_true, y_pred, y_prob
 
-print("On OLD Test Set (cybersectony):")
-old_on_old = evaluate(old_email, old_url, old_comm, old_test_df)
-new_on_old = evaluate(email_model, url_model, comm_model, old_test_df)
 
-print("On NEW Test Set (final_emails + final_urls):")
-old_on_new = evaluate(old_email, old_url, old_comm, new_test_df)
-new_on_new = evaluate(email_model, url_model, comm_model, new_test_df)
+# ====================== CONTINUAL FINE-TUNING ======================
+print("\nStarting Continual Fine-Tuning...")
 
-print(f"{'Dataset':<20} {'Metric':<10} {'Old Model':<10} {'New Model':<10} {'Change'}")
-print("-" * 65)
-for name, old_m, new_m in [("Old Test Set", old_on_old, new_on_old), 
-                           ("New Test Set", old_on_new, new_on_new)]:
-    for metric in ['accuracy', 'f1', 'mcc']:
-        change = new_m[metric] - old_m[metric]
-        print(f"{name:<20} {metric:<10} {old_m[metric]:.4f}    {new_m[metric]:.4f}    {'+' if change >= 0 else ''}{change:.4f}")
+email_model = DistilBertEmail().to(device)
+url_model   = DomURLBERT().to(device)
+comm_model  = MessagePassing(rounds=2).to(device)
 
-print("\nComparison completed!")
+email_model.load_state_dict(old_email.state_dict())
+url_model.load_state_dict(old_url.state_dict())
+comm_model.load_state_dict(old_comm.state_dict())
+
+optimizer  = optim.AdamW(
+    list(email_model.parameters()) +
+    list(url_model.parameters()) +
+    list(comm_model.parameters()),
+    lr=3e-5, weight_decay=0.05
+)
+criterion  = nn.BCEWithLogitsLoss()
+batch_size = 8
+patience   = 5
+
+history = {
+    "train_loss": [], "val_loss": [],
+    "train_acc":  [], "val_acc":  [],
+    "train_f1":   [], "val_f1":   [],
+    "train_mcc":  [], "val_mcc":  [],
+    "train_auc":  [], "val_auc":  [],
+}
+
+best_val_loss    = float('inf')
+patience_counter = 0
+best_state       = None
+
+for epoch in range(20):
+    email_model.train(); url_model.train(); comm_model.train()
+    tr_loss = 0.0
+    tr_true, tr_pred, tr_prob = [], [], []
+
+    for i in tqdm(range(0, len(train_df), batch_size),
+                  desc=f"Epoch {epoch+1:02d}", leave=False):
+        batch  = train_df.iloc[i:i + batch_size]
+        labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+
+        e_in = email_tokenizer(batch['email_text'].tolist(), padding=True,
+                               truncation=True, max_length=256,
+                               return_tensors="pt").to(device)
+        u_in = url_tokenizer(batch['url'].tolist(), padding=True,
+                             truncation=True, max_length=128,
+                             return_tensors="pt").to(device)
+
+        e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+        u_feat = url_model(u_in.input_ids,   u_in.attention_mask)
+        logits = comm_model(e_feat, u_feat)
+        loss   = criterion(logits, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(email_model.parameters()) +
+            list(url_model.parameters()) +
+            list(comm_model.parameters()), 1.0)
+        optimizer.step()
+        tr_loss += loss.item()
+
+        with torch.no_grad():
+            prob = torch.sigmoid(logits).cpu().numpy()
+            pred = (prob > 0.5).astype(int)
+        tr_true.extend(batch['label'].values)
+        tr_pred.extend(pred)
+        tr_prob.extend(prob)
+
+    avg_tr_loss = tr_loss / (len(train_df) // batch_size + 1)
+
+    # ---- Validate ----
+    email_model.eval(); url_model.eval(); comm_model.eval()
+    vl_loss = 0.0
+    vl_true, vl_pred, vl_prob = [], [], []
+
+    with torch.no_grad():
+        for i in range(0, len(val_df), batch_size):
+            batch  = val_df.iloc[i:i + batch_size]
+            labels = torch.tensor(batch['label'].values, dtype=torch.float32).to(device)
+            e_in   = email_tokenizer(batch['email_text'].tolist(), padding=True,
+                                     truncation=True, max_length=256,
+                                     return_tensors="pt").to(device)
+            u_in   = url_tokenizer(batch['url'].tolist(), padding=True,
+                                   truncation=True, max_length=128,
+                                   return_tensors="pt").to(device)
+            e_feat = email_model(e_in.input_ids, e_in.attention_mask)
+            u_feat = url_model(u_in.input_ids,   u_in.attention_mask)
+            logits = comm_model(e_feat, u_feat)
+            loss   = criterion(logits, labels)
+            vl_loss += loss.item()
+
+            prob = torch.sigmoid(logits).cpu().numpy()
+            pred = (prob > 0.5).astype(int)
+            vl_true.extend(batch['label'].values)
+            vl_pred.extend(pred)
+            vl_prob.extend(prob)
+
+    avg_vl_loss = vl_loss / (len(val_df) // batch_size + 1)
+
+    # Record history
+    history["train_loss"].append(avg_tr_loss)
+    history["val_loss"].append(avg_vl_loss)
+    history["train_acc"].append(accuracy_score(tr_true, tr_pred))
+    history["val_acc"].append(accuracy_score(vl_true, vl_pred))
+    history["train_f1"].append(f1_score(tr_true, tr_pred, zero_division=0))
+    history["val_f1"].append(f1_score(vl_true, vl_pred, zero_division=0))
+    history["train_mcc"].append(matthews_corrcoef(tr_true, tr_pred))
+    history["val_mcc"].append(matthews_corrcoef(vl_true, vl_pred))
+    history["train_auc"].append(roc_auc_score(tr_true, tr_prob))
+    history["val_auc"].append(roc_auc_score(vl_true, vl_prob))
+
+    print(f"Epoch {epoch+1:2d} | "
+          f"Train Loss: {avg_tr_loss:.4f}  Acc: {history['train_acc'][-1]:.4f} | "
+          f"Val Loss: {avg_vl_loss:.4f}  Acc: {history['val_acc'][-1]:.4f}")
+
+    if avg_vl_loss < best_val_loss:
+        best_val_loss    = avg_vl_loss
+        patience_counter = 0
+        best_state = {
+            'email_model': {k: v.cpu().clone() for k, v in email_model.state_dict().items()},
+            'url_model':   {k: v.cpu().clone() for k, v in url_model.state_dict().items()},
+            'comm_model':  {k: v.cpu().clone() for k, v in comm_model.state_dict().items()},
+        }
+    else:
+        patience_counter += 1
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+# Restore best weights
+email_model.load_state_dict({k: v.to(device) for k, v in best_state['email_model'].items()})
+url_model.load_state_dict({k: v.to(device)   for k, v in best_state['url_model'].items()})
+comm_model.load_state_dict({k: v.to(device)  for k, v in best_state['comm_model'].items()})
+
+# ====================== SAVE NEW MODEL ======================
+save_dir = "continual_finetuned_model"
+os.makedirs(save_dir, exist_ok=True)
+torch.save(email_model.state_dict(), f"{save_dir}/email_model.pth")
+torch.save(url_model.state_dict(),   f"{save_dir}/url_model.pth")
+torch.save(comm_model.state_dict(),  f"{save_dir}/comm_model.pth")
+print(f"\nNew fine-tuned model saved to: {save_dir}/")
+
+# ====================== ALL EVALUATIONS ======================
+print("\nRunning all evaluations...")
+
+# New model on both test sets
+nt_new_true, nt_new_pred, nt_new_prob = run_inference(email_model, url_model, comm_model, new_test)
+nt_old_true, nt_old_pred, nt_old_prob = run_inference(email_model, url_model, comm_model, old_test)
+
+# Old model on both test sets
+ot_new_true, ot_new_pred, ot_new_prob = run_inference(old_email, old_url, old_comm, new_test)
+ot_old_true, ot_old_pred, ot_old_prob = run_inference(old_email, old_url, old_comm, old_test)
+
+new_model_on_new = compute_all_metrics(nt_new_true, nt_new_pred, nt_new_prob, "New Model → New Test Set")
+new_model_on_old = compute_all_metrics(nt_old_true, nt_old_pred, nt_old_prob, "New Model → Old Test Set")
+old_model_on_new = compute_all_metrics(ot_new_true, ot_new_pred, ot_new_prob, "Old Model → New Test Set")
+old_model_on_old = compute_all_metrics(ot_old_true, ot_old_pred, ot_old_prob, "Old Model → Old Test Set")
+
+epochs_ran = list(range(1, len(history["train_loss"]) + 1))
+
+# ====================== ALL PLOTS ======================
+
+# ---- Plot 2: Loss Curve ----
+def plot_loss_curve():
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(epochs_ran, history["train_loss"], color=PALETTE["train"],
+            lw=2, marker='o', markersize=4, label="Train Loss")
+    ax.plot(epochs_ran, history["val_loss"], color=PALETTE["val"],
+            lw=2, marker='s', markersize=4, label="Validation Loss")
+    best_ep = int(np.argmin(history["val_loss"])) + 1
+    ax.axvline(best_ep, color='grey', linestyle='--', lw=1.2,
+               label=f"Best epoch ({best_ep})")
+    ax.set_xlabel("Epoch"); ax.set_ylabel("BCE Loss")
+    ax.set_title("Continual Fine-Tuning — Loss Curve", fontweight='bold')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/02_loss_curve.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 02_loss_curve.png")
+
+
+# ---- Plot 3: Per-epoch metrics (4-panel) ----
+def plot_epoch_metrics():
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    specs = [
+        ("Accuracy", "train_acc",  "val_acc"),
+        ("F1-Score", "train_f1",   "val_f1"),
+        ("MCC",      "train_mcc",  "val_mcc"),
+        ("ROC-AUC",  "train_auc",  "val_auc"),
+    ]
+    for ax, (title, tr_key, vl_key) in zip(axes.flat, specs):
+        ax.plot(epochs_ran, history[tr_key], color=PALETTE["train"],
+                lw=2, marker='o', markersize=3, label="Train")
+        ax.plot(epochs_ran, history[vl_key], color=PALETTE["val"],
+                lw=2, marker='s', markersize=3, label="Validation")
+        ax.set_title(title, fontweight='bold')
+        ax.set_xlabel("Epoch"); ax.set_ylabel(title)
+        ax.legend(fontsize=9)
+    plt.suptitle("Per-Epoch Metrics — Continual Fine-Tuning",
+                 fontsize=14, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/03_epoch_metrics.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 03_epoch_metrics.png")
+
+
+# ---- Plot 4: Side-by-side confusion matrices (2×2 grid: model × test set) ----
+def plot_confusion_matrices():
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    combos = [
+        ("Old Model → Old Test",  ot_old_true, ot_old_pred, PALETTE["old_model"]),
+        ("Old Model → New Test",  ot_new_true, ot_new_pred, PALETTE["old_model"]),
+        ("New Model → Old Test",  nt_old_true, nt_old_pred, PALETTE["new_model"]),
+        ("New Model → New Test",  nt_new_true, nt_new_pred, PALETTE["new_model"]),
+    ]
+    for ax, (title, yt, yp, color) in zip(axes.flat, combos):
+        cm     = confusion_matrix(yt, yp)
+        cm_pct = cm.astype(float) / cm.sum(axis=1, keepdims=True) * 100
+        annot  = np.array([[f"{v}\n({p:.1f}%)" for v, p in zip(rv, rp)]
+                            for rv, rp in zip(cm, cm_pct)])
+        sns.heatmap(cm, annot=annot, fmt='', ax=ax,
+                    cmap=sns.light_palette(color, as_cmap=True),
+                    linewidths=0.5, linecolor='white',
+                    xticklabels=["Legit (0)", "Phish (1)"],
+                    yticklabels=["Legit (0)", "Phish (1)"],
+                    cbar=False)
+        ax.set_title(title, fontweight='bold')
+        ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
+    plt.suptitle("Confusion Matrices — Old vs New Model × Old vs New Test Set",
+                 fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/04_confusion_matrices.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 04_confusion_matrices.png")
+
+
+# ---- Plot 5: ROC Curves — all 4 combinations ----
+def plot_roc_curves():
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+    # Left: Old Test Set
+    for label, yt, yp, color, ls in [
+        ("Old Model", ot_old_true, ot_old_prob, PALETTE["old_model"], "-"),
+        ("New Model", nt_old_true, nt_old_prob, PALETTE["new_model"], "--"),
+    ]:
+        fpr_r, tpr_r, _ = roc_curve(yt, yp)
+        auc = roc_auc_score(yt, yp)
+        axes[0].plot(fpr_r, tpr_r, color=color, lw=2.2, linestyle=ls,
+                     label=f"{label} (AUC = {auc:.4f})")
+    axes[0].plot([0, 1], [0, 1], 'k--', lw=1)
+    axes[0].set_title("ROC — Old Test Set", fontweight='bold')
+    axes[0].set_xlabel("FPR"); axes[0].set_ylabel("TPR")
+    axes[0].legend(loc='lower right')
+
+    # Right: New Test Set
+    for label, yt, yp, color, ls in [
+        ("Old Model", ot_new_true, ot_new_prob, PALETTE["old_model"], "-"),
+        ("New Model", nt_new_true, nt_new_prob, PALETTE["new_model"], "--"),
+    ]:
+        fpr_r, tpr_r, _ = roc_curve(yt, yp)
+        auc = roc_auc_score(yt, yp)
+        axes[1].plot(fpr_r, tpr_r, color=color, lw=2.2, linestyle=ls,
+                     label=f"{label} (AUC = {auc:.4f})")
+    axes[1].plot([0, 1], [0, 1], 'k--', lw=1)
+    axes[1].set_title("ROC — New Test Set", fontweight='bold')
+    axes[1].set_xlabel("FPR"); axes[1].set_ylabel("TPR")
+    axes[1].legend(loc='lower right')
+
+    plt.suptitle("ROC Curves — Old vs New Model", fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/05_roc_curves.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 05_roc_curves.png")
+
+
+# ---- Plot 6: Precision-Recall Curves ----
+def plot_pr_curves():
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+    for ax, test_label, combos_pr in [
+        (axes[0], "Old Test Set", [
+            ("Old Model", ot_old_true, ot_old_prob, PALETTE["old_model"], "-"),
+            ("New Model", nt_old_true, nt_old_prob, PALETTE["new_model"], "--"),
+        ]),
+        (axes[1], "New Test Set", [
+            ("Old Model", ot_new_true, ot_new_prob, PALETTE["old_model"], "-"),
+            ("New Model", nt_new_true, nt_new_prob, PALETTE["new_model"], "--"),
+        ]),
+    ]:
+        for label, yt, yp, color, ls in combos_pr:
+            prec, rec, _ = precision_recall_curve(yt, yp)
+            ap = average_precision_score(yt, yp)
+            ax.plot(rec, prec, color=color, lw=2.2, linestyle=ls,
+                    label=f"{label} (AP = {ap:.4f})")
+        baseline = sum(yt) / len(yt)
+        ax.axhline(baseline, color='grey', linestyle=':', lw=1,
+                   label=f"Baseline ({baseline:.2f})")
+        ax.set_title(f"PR Curve — {test_label}", fontweight='bold')
+        ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
+        ax.legend(fontsize=8)
+    plt.suptitle("Precision-Recall Curves — Old vs New Model",
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/06_pr_curves.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 06_pr_curves.png")
+
+
+# ---- Plot 7: Score Distributions (2×2: model × test set) ----
+def plot_score_distributions():
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    combos = [
+        ("Old Model — Old Test", ot_old_true, ot_old_prob),
+        ("Old Model — New Test", ot_new_true, ot_new_prob),
+        ("New Model — Old Test", nt_old_true, nt_old_prob),
+        ("New Model — New Test", nt_new_true, nt_new_prob),
+    ]
+    for ax, (title, yt, yp) in zip(axes.flat, combos):
+        for cls, lbl, color in [(0, "Legitimate", PALETTE["legit"]),
+                                 (1, "Phishing",   PALETTE["phish"])]:
+            mask = (yt == cls)
+            ax.hist(yp[mask], bins=30, alpha=0.6, color=color,
+                    label=f"{lbl} (n={mask.sum()})", edgecolor='white', linewidth=0.3)
+        ax.axvline(0.5, color='black', linestyle='--', lw=1.2)
+        ax.set_title(title, fontweight='bold')
+        ax.set_xlabel("Predicted Probability"); ax.set_ylabel("Count")
+        ax.legend(fontsize=8)
+    plt.suptitle("Score Distributions by Class",
+                 fontsize=14, fontweight='bold', y=1.01)
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/07_score_distributions.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 07_score_distributions.png")
+
+
+# ---- Plot 8: Threshold Sweep — New Model on New Test Set ----
+def plot_threshold_sweep():
+    thresholds = np.linspace(0.01, 0.99, 200)
+    sweep = {"F1": [], "MCC": [], "Precision": [], "Recall": []}
+    for t in thresholds:
+        pred_t = (nt_new_prob >= t).astype(int)
+        sweep["F1"].append(f1_score(nt_new_true, pred_t, zero_division=0))
+        sweep["MCC"].append(matthews_corrcoef(nt_new_true, pred_t))
+        sweep["Precision"].append(precision_score(nt_new_true, pred_t, zero_division=0))
+        sweep["Recall"].append(recall_score(nt_new_true, pred_t, zero_division=0))
+
+    best_f1  = thresholds[int(np.argmax(sweep["F1"]))]
+    best_mcc = thresholds[int(np.argmax(sweep["MCC"]))]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    colors_m = {"F1": "#4C72B0", "MCC": "#DD8452",
+                "Precision": "#55A868", "Recall": "#C44E52"}
+    for m, vals in sweep.items():
+        ax.plot(thresholds, vals, lw=2, label=m, color=colors_m[m])
+    ax.axvline(best_f1,  color="#4C72B0", linestyle='--', lw=1.2,
+               label=f"Best F1 @ {best_f1:.2f}")
+    ax.axvline(best_mcc, color="#DD8452", linestyle='--', lw=1.2,
+               label=f"Best MCC @ {best_mcc:.2f}")
+    ax.axvline(0.5, color='black', linestyle=':', lw=1, label="Default (0.5)")
+    ax.set_xlabel("Decision Threshold"); ax.set_ylabel("Metric Value")
+    ax.set_title("Threshold Sweep — New Model on New Test Set", fontweight='bold')
+    ax.legend(fontsize=8, ncol=2); ax.set_xlim(0, 1); ax.set_ylim(-0.05, 1.05)
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/08_threshold_sweep.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 08_threshold_sweep.png")
+    return float(best_f1), float(best_mcc)
+
+
+# ---- Plot 9: Calibration Curves ----
+def plot_calibration():
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for ax, test_label, combos_cal in [
+        (axes[0], "Old Test Set", [
+            ("Old Model", ot_old_true, ot_old_prob, PALETTE["old_model"]),
+            ("New Model", nt_old_true, nt_old_prob, PALETTE["new_model"]),
+        ]),
+        (axes[1], "New Test Set", [
+            ("Old Model", ot_new_true, ot_new_prob, PALETTE["old_model"]),
+            ("New Model", nt_new_true, nt_new_prob, PALETTE["new_model"]),
+        ]),
+    ]:
+        ax.plot([0, 1], [0, 1], 'k--', lw=1.2, label="Perfect")
+        for label, yt, yp, color in combos_cal:
+            frac_pos, mean_pred = calibration_curve(yt, yp, n_bins=10, strategy='uniform')
+            ax.plot(mean_pred, frac_pos, color=color, lw=2, marker='o',
+                    markersize=5, label=label)
+        ax.set_title(f"Calibration — {test_label}", fontweight='bold')
+        ax.set_xlabel("Mean Predicted Prob"); ax.set_ylabel("Fraction of Positives")
+        ax.legend()
+    plt.suptitle("Reliability / Calibration Curves", fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/09_calibration_curves.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 09_calibration_curves.png")
+
+
+# ---- Plot 10: Grouped bar — Old vs New on both test sets ----
+def plot_grouped_comparison_bar():
+    core_metrics = ["Accuracy", "Precision", "Recall (Sens.)",
+                    "F1-Score", "MCC", "ROC-AUC", "Avg Precision", "Cohen's Kappa"]
+    x      = np.arange(len(core_metrics))
+    width  = 0.2
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
+    titles = ["Old Test Set", "New Test Set"]
+    pairs  = [
+        (old_model_on_old, new_model_on_old),
+        (old_model_on_new, new_model_on_new),
+    ]
+    for ax, title, (old_m, new_m) in zip(axes, titles, pairs):
+        old_vals = [old_m[m] for m in core_metrics]
+        new_vals = [new_m[m] for m in core_metrics]
+        b1 = ax.bar(x - width / 2, old_vals, width, label="Old Model",
+                    color=PALETTE["old_model"], edgecolor='white', linewidth=0.6)
+        b2 = ax.bar(x + width / 2, new_vals, width, label="New Model",
+                    color=PALETTE["new_model"], edgecolor='white', linewidth=0.6)
+        for bar, v in zip(list(b1) + list(b2), old_vals + new_vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.006, f"{v:.3f}",
+                    ha='center', va='bottom', fontsize=6.5, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(core_metrics, rotation=28, ha='right', fontsize=8)
+        ax.set_ylim(0, 1.18)
+        ax.set_title(title, fontweight='bold')
+        ax.set_ylabel("Score")
+        ax.legend(fontsize=9)
+    plt.suptitle("Old vs New Model — Core Metrics Comparison",
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/10_grouped_comparison_bar.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 10_grouped_comparison_bar.png")
+
+
+# ---- Plot 11: Delta (improvement) heat-strip ----
+def plot_delta_heatmap():
+    display_metrics = [
+        "Accuracy", "Precision", "Recall (Sens.)", "Specificity",
+        "F1-Score", "MCC", "Cohen's Kappa", "ROC-AUC",
+        "Avg Precision", "Log Loss", "Brier Score", "NPV", "FPR", "FNR",
+    ]
+    # Positive delta = improvement for most; Log Loss, Brier, FPR, FNR = lower is better
+    lower_is_better = {"Log Loss", "Brier Score", "FPR", "FNR"}
+
+    delta_old = {}
+    delta_new = {}
+    for m in display_metrics:
+        raw_old = new_model_on_old[m] - old_model_on_old[m]
+        raw_new = new_model_on_new[m] - old_model_on_new[m]
+        # Flip sign so positive always = improvement
+        delta_old[m] = -raw_old if m in lower_is_better else raw_old
+        delta_new[m] = -raw_new if m in lower_is_better else raw_new
+
+    df_delta = pd.DataFrame({
+        "Old Test Set": delta_old,
+        "New Test Set": delta_new,
+    }).T
+
+    fig, ax = plt.subplots(figsize=(14, 3))
+    sns.heatmap(df_delta, annot=True, fmt=".4f", ax=ax,
+                cmap="RdYlGn", center=0,
+                linewidths=0.4, linecolor='white',
+                cbar_kws={"label": "Δ (New − Old)  [positive = improved]"})
+    ax.set_title("Performance Delta: New Model − Old Model\n"
+                 "(positive = improvement; Log Loss / Brier / FPR / FNR signs already flipped)",
+                 fontsize=12, fontweight='bold', pad=10)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha='right')
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/11_delta_heatmap.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 11_delta_heatmap.png")
+
+
+# ---- Plot 12: Full metrics heatmap (all 4 combos) ----
+def plot_full_metrics_heatmap():
+    display_metrics = [
+        "Accuracy", "Precision", "Recall (Sens.)", "Specificity",
+        "F1-Score", "MCC", "Cohen's Kappa", "ROC-AUC",
+        "Avg Precision", "Log Loss", "Brier Score", "NPV", "FPR", "FNR",
+    ]
+    df_heat = pd.DataFrame({
+        "Old → Old": [old_model_on_old[m] for m in display_metrics],
+        "Old → New": [old_model_on_new[m] for m in display_metrics],
+        "New → Old": [new_model_on_old[m] for m in display_metrics],
+        "New → New": [new_model_on_new[m] for m in display_metrics],
+    }, index=display_metrics).T
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    sns.heatmap(df_heat, annot=True, fmt=".4f", ax=ax,
+                cmap="RdYlGn", vmin=0, vmax=1,
+                linewidths=0.4, linecolor='white',
+                cbar_kws={"label": "Metric Value"})
+    ax.set_title("Comprehensive Metrics — All Four Evaluation Combinations",
+                 fontsize=13, fontweight='bold', pad=10)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=35, ha='right')
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/12_full_metrics_heatmap.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 12_full_metrics_heatmap.png")
+
+
+# ---- Plot 13: Catastrophic Forgetting Check — FN/FP bar ----
+def plot_forgetting_check():
+    labels_bar = ["Old → Old\n(Old Model)", "New → Old\n(New Model)"]
+    fp_vals = [old_model_on_old["FP"], new_model_on_old["FP"]]
+    fn_vals = [old_model_on_old["FN"], new_model_on_old["FN"]]
+
+    x = np.arange(len(labels_bar))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(7, 5))
+    b1 = ax.bar(x - width / 2, fp_vals, width, label="False Positives",
+                color="#e67e22", edgecolor='white')
+    b2 = ax.bar(x + width / 2, fn_vals, width, label="False Negatives",
+                color="#c0392b", edgecolor='white')
+    for bars in [b1, b2]:
+        for bar in bars:
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + max(fp_vals + fn_vals) * 0.01,
+                    str(int(bar.get_height())),
+                    ha='center', va='bottom', fontsize=10, fontweight='bold')
+    ax.set_xticks(x); ax.set_xticklabels(labels_bar)
+    ax.set_ylabel("Count"); ax.set_title(
+        "Catastrophic Forgetting Check\nFP & FN on Old Test Set",
+        fontweight='bold')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(f"{PLOT_DIR}/13_forgetting_check.png", bbox_inches='tight')
+    plt.close()
+    print("  Saved: 13_forgetting_check.png")
+
+
+print("\n--- Generating plots ---")
+plot_loss_curve()
+plot_epoch_metrics()
+plot_confusion_matrices()
+plot_roc_curves()
+plot_pr_curves()
+plot_score_distributions()
+best_f1_thresh, best_mcc_thresh = plot_threshold_sweep()
+plot_calibration()
+plot_grouped_comparison_bar()
+plot_delta_heatmap()
+plot_full_metrics_heatmap()
+plot_forgetting_check()
+
+# ====================== SAVE RESULTS ======================
+all_results = {
+    "old_model_on_old_test": {k: (float(v) if isinstance(v, float) else int(v))
+                               for k, v in old_model_on_old.items()},
+    "old_model_on_new_test": {k: (float(v) if isinstance(v, float) else int(v))
+                               for k, v in old_model_on_new.items()},
+    "new_model_on_old_test": {k: (float(v) if isinstance(v, float) else int(v))
+                               for k, v in new_model_on_old.items()},
+    "new_model_on_new_test": {k: (float(v) if isinstance(v, float) else int(v))
+                               for k, v in new_model_on_new.items()},
+    "best_threshold_f1":  best_f1_thresh,
+    "best_threshold_mcc": best_mcc_thresh,
+    "epochs_ran": len(epochs_ran),
+}
+with open(f"{PLOT_DIR}/metrics_summary.json", "w") as f:
+    json.dump(all_results, f, indent=2)
+print("  Saved: metrics_summary.json")
+
+# Classification reports
+with open(f"{PLOT_DIR}/classification_reports.txt", "w") as f:
+    for name, yt, yp in [
+        ("Old Model → Old Test", ot_old_true, ot_old_pred),
+        ("Old Model → New Test", ot_new_true, ot_new_pred),
+        ("New Model → Old Test", nt_old_true, nt_old_pred),
+        ("New Model → New Test", nt_new_true, nt_new_pred),
+    ]:
+        f.write(f"{'='*55}\n{name}\n{'='*55}\n")
+        f.write(classification_report(yt, yp, target_names=["Legitimate", "Phishing"]))
+        f.write("\n")
+print("  Saved: classification_reports.txt")
+
+# Pretty print final comparison table
+print("\n" + "=" * 90)
+print("FINAL COMPARISON TABLE")
+print("=" * 90)
+print(f"{'Evaluation':<28} {'Accuracy':>10} {'F1':>10} {'MCC':>10} {'ROC-AUC':>10}")
+print("-" * 70)
+for name, m in [
+    ("Old Model → Old Test",  old_model_on_old),
+    ("New Model → Old Test",  new_model_on_old),
+    ("Old Model → New Test",  old_model_on_new),
+    ("New Model → New Test",  new_model_on_new),
+]:
+    print(f"{name:<28} {m['Accuracy']:>10.4f} {m['F1-Score']:>10.4f} "
+          f"{m['MCC']:>10.4f} {m['ROC-AUC']:>10.4f}")
+
+print(f"\n✅ All plots saved to: {PLOT_DIR}/")
