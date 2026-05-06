@@ -103,19 +103,16 @@ class MessagePassing(nn.Module):
 
 
 # ====================== LOAD OLD MODEL ======================
+# ====================== LOAD OLD MODEL ======================
 print("\nLoading old best trained model from best_trained_model.pth ...")
 
 checkpoint = torch.load("best_trained_model.pth", map_location=device)
-
-# Print available keys so you can verify the structure if loading fails
 print(f"  Checkpoint keys: {list(checkpoint.keys())}")
 
 old_email = DistilBertEmail().to(device)
 old_url   = DomURLBERT().to(device)
 old_comm  = MessagePassing(rounds=2).to(device)
 
-# Expected keys: 'email_model', 'url_model', 'comm_model'
-# If your keys differ, update the strings below to match what was printed above
 old_email.load_state_dict(checkpoint['email_model'])
 old_url.load_state_dict(checkpoint['url_model'])
 old_comm.load_state_dict(checkpoint['comm_model'])
