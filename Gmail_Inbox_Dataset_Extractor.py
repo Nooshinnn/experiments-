@@ -1,26 +1,3 @@
-"""
-Gmail Inbox Dataset Extractor
-==============================
-Extracts two datasets from your Gmail inbox:
-  1. emails_dataset.csv  — sender_name, subject, body, label (all 0)
-  2. urls_dataset.csv    — url, label (all 1)
-
-SETUP (one-time):
-  pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client pandas
-
-  Then follow the Google Cloud Console steps below to get credentials.json.
-
-HOW TO GET credentials.json:
-  1. Go to https://console.cloud.google.com/
-  2. Create a new project (or select an existing one)
-  3. Enable the Gmail API:  APIs & Services → Enable APIs → search "Gmail API" → Enable
-  4. Create OAuth credentials:  APIs & Services → Credentials → Create Credentials → OAuth client ID
-     - Application type: Desktop app
-     - Download the JSON → save as  credentials.json  in the same folder as this script
-  5. On first run, a browser window will open for you to authorise access.
-     A token.json file will be saved so you won't need to do this again.
-"""
-
 import os
 import re
 import base64
@@ -33,16 +10,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# ─────────────────────────────────────────────
-# CONFIGURATION — edit these if needed
-# ─────────────────────────────────────────────
-CREDENTIALS_FILE = "credentials.json"   # path to your OAuth credentials file
-TOKEN_FILE       = "token.json"         # auto-created after first auth
-MAX_EMAILS       = None              # max emails to fetch (None = all)
+CREDENTIALS_FILE = "credentials.json"   # path to OAuth credentials file
+TOKEN_FILE       = "token.json"         
+MAX_EMAILS       = None
 OUTPUT_EMAILS    = "emails_dataset.csv"
 OUTPUT_URLS      = "urls_dataset.csv"
 
-# Gmail scopes — read-only is enough
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
 # URL regex pattern
@@ -51,9 +24,6 @@ URL_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# ─────────────────────────────────────────────
-# AUTH
-# ─────────────────────────────────────────────
 def authenticate():
     creds = None
     if os.path.exists(TOKEN_FILE):
@@ -69,11 +39,7 @@ def authenticate():
     return creds
 
 
-# ─────────────────────────────────────────────
-# EMAIL BODY EXTRACTION
-# ─────────────────────────────────────────────
 def decode_part(data: str) -> str:
-    """Base64url-decode a Gmail message part."""
     try:
         return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
     except Exception:
@@ -81,7 +47,6 @@ def decode_part(data: str) -> str:
 
 
 def extract_body(payload: dict) -> str:
-    """Recursively extract plain-text (or stripped HTML) body from a Gmail payload."""
     mime_type = payload.get("mimeType", "")
     body_data = payload.get("body", {}).get("data", "")
 
@@ -96,7 +61,7 @@ def extract_body(payload: dict) -> str:
         clean = re.sub(r"\s+", " ", clean).strip()
         return clean
 
-    # Multipart: recurse into parts
+    
     parts = payload.get("parts", [])
     for part in parts:
         result = extract_body(part)
@@ -106,9 +71,6 @@ def extract_body(payload: dict) -> str:
     return ""
 
 
-# ─────────────────────────────────────────────
-# HEADER HELPER
-# ─────────────────────────────────────────────
 def get_header(headers: list, name: str) -> str:
     for h in headers:
         if h["name"].lower() == name.lower():
@@ -117,7 +79,6 @@ def get_header(headers: list, name: str) -> str:
 
 
 def parse_sender_name(from_header: str) -> str:
-    """Extract display name from 'Name <email>' or return the raw value."""
     match = re.match(r'^"?([^"<]+?)"?\s*<', from_header)
     if match:
         return match.group(1).strip()
@@ -128,7 +89,6 @@ def parse_sender_name(from_header: str) -> str:
 # MAIN EXTRACTION
 # ─────────────────────────────────────────────
 def fetch_emails(service, max_emails):
-    """Fetch all inbox messages and return a list of raw message objects."""
     messages = []
     page_token = None
 
@@ -181,7 +141,6 @@ def process_messages(service, message_ids):
         subject     = get_header(headers, "Subject")
         body        = extract_body(msg.get("payload", {}))
 
-        # ── Email row ──────────────────────────────
         email_rows.append({
             "sender_name": sender_name,
             "subject":     subject,
@@ -189,7 +148,7 @@ def process_messages(service, message_ids):
             "label":       0
         })
 
-        # ── URL rows ───────────────────────────────
+
         combined_text = f"{subject} {body}"
         urls = URL_PATTERN.findall(combined_text)
 
@@ -203,9 +162,7 @@ def process_messages(service, message_ids):
     return email_rows, url_rows
 
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
+
 def main():
     if not os.path.exists(CREDENTIALS_FILE):
         print(
