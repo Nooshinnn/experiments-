@@ -1,4 +1,4 @@
-# File: 18_BiLSTM_Email_only.py
+
 import pandas as pd
 import re
 import torch
@@ -24,7 +24,6 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== GPU CHECK ======================
 print("="*80)
 print("GPU STATUS CHECK")
 if torch.cuda.is_available():
@@ -33,8 +32,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 print("="*80)
 
-# ====================== LOAD LARGE DATASET ======================
-print("\nLoading large training dataset...")
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 
@@ -44,7 +41,6 @@ df = df.rename(columns={label_col: "label", "content": "email_text"})
 
 print(f"Training email samples: {len(df)}")
 
-# ====================== BiLSTM MODEL ======================
 class BiLSTM(nn.Module):
     def __init__(self, vocab_size=30522, embed_dim=300, hidden_dim=256, num_layers=2, dropout=0.3):
         super().__init__()
@@ -68,8 +64,6 @@ class BiLSTM(nn.Module):
         return self.fc(out)
 
 tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-
-# ====================== ALL METRICS ======================
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -90,7 +84,6 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD TRAINING WITH EARLY STOPPING ======================
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -159,8 +152,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
         if patience_counter >= patience:
             print(f"    Early stopping triggered at epoch {epoch+1} (patience = {patience})")
             break
-
-    # ====================== EVALUATION ======================
     email_model.eval()
 
     y_true = val_df['label'].values
@@ -186,7 +177,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     torch.cuda.empty_cache()
     gc.collect()
 
-# ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\nFinal Average for BiLSTM (Email-only):")
 for k, v in avg_metrics.items():
