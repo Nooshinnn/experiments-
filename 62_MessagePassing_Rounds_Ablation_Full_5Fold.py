@@ -1,4 +1,4 @@
-# File: 63_MessagePassing_Ablation_Matching_Style.py
+
 import pandas as pd
 import re
 import torch
@@ -27,7 +27,6 @@ print("MESSAGE PASSING ABLATION - MATCHING YOUR REFERENCE STYLE")
 print("Same models + early stopping + full metrics + all plots")
 print("="*160)
 
-# ====================== LOAD DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -53,7 +52,6 @@ df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_mat
 
 print(f"Final samples: {len(df)}")
 
-# ====================== MODELS (Same as your reference) ======================
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -81,7 +79,6 @@ class DomURLBERT(nn.Module):
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== MESSAGE PASSING (with variable rounds) ======================
 class MessagePassing(nn.Module):
     def __init__(self, dim=128, rounds=2):
         super().__init__()
@@ -98,7 +95,6 @@ class MessagePassing(nn.Module):
         comm = torch.cat([e, u], dim=1)
         return self.fc(comm).squeeze(-1)
 
-# ====================== METRICS (Same as reference) ======================
 def compute_all_metrics(y_true, y_pred, y_prob):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -115,7 +111,6 @@ def compute_all_metrics(y_true, y_pred, y_prob):
     }
     return metrics
 
-# ====================== ABLATION ======================
 rounds_list = [1, 2, 3, 4]
 ablation_results = {}
 n_folds = 5
@@ -211,7 +206,6 @@ for rounds in rounds_list:
 with open('message_passing_ablation_full_results.json', 'w') as f:
     json.dump(ablation_results, f)
 
-# ====================== ALL PLOTS ======================
 rounds = list(ablation_results.keys())
 avg_f1 = [np.mean([r['f1'] for r in ablation_results[r]]) for r in rounds]
 avg_mcc = [np.mean([r['mcc'] for r in ablation_results[r]]) for r in rounds]
@@ -237,5 +231,3 @@ plt.legend()
 plt.grid(True)
 plt.savefig("Ablation_All_Metrics_Line.png", dpi=300, bbox_inches='tight')
 
-print("\n✅ Ablation finished!")
-print("Check the average F1 for 2 rounds — it should now match your previous high results.")
