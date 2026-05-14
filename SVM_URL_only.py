@@ -1,4 +1,4 @@
-# File: 13_SVM_URL_only.py
+
 import pandas as pd
 import re
 import numpy as np
@@ -21,8 +21,8 @@ print("="*80)
 print("SVM (URL-only) - 10-Fold CV with Early Stopping")
 print("="*80)
 
-# ====================== LOAD DATASET ======================
-dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
+
+
 df = pd.DataFrame(dataset)
 
 label_col = 'labels' if 'labels' in df.columns else 'label'
@@ -48,7 +48,7 @@ def get_synthetic_url(label):
 
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_synthetic_url(row['label']), axis=1)
 
-# ====================== LEXICAL FEATURES ======================
+
 def extract_hannousse_style_url_features(url):
     if not isinstance(url, str) or not url.strip():
         return {f: 0.0 for f in ['length_url','length_hostname','ip','nb_dots','nb_hyphens','nb_at','nb_qm',
@@ -105,7 +105,7 @@ url_features_df = pd.DataFrame([extract_hannousse_style_url_features(u) for u in
 X = url_features_df.values.astype(np.float32)
 y = df['label'].values
 
-# ====================== METRICS ======================
+
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -126,7 +126,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD WITH EARLY STOPPING ======================
+
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -172,7 +172,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
     gc.collect()
 
-# ====================== FINAL RESULTS ======================
+
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\nFinal Average for SVM (URL-only):")
 for k, v in avg_metrics.items():
