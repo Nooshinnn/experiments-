@@ -1,4 +1,4 @@
-# File: Experiment3_McNemar_BothModels_OneGo.py
+
 import pandas as pd
 import re
 import torch
@@ -24,7 +24,6 @@ print("EXPERIMENT 3: McNemar's Test")
 print("Message Passing (2 rounds) vs Simple Concat - One Fold")
 print("="*80)
 
-# ====================== LOAD DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -52,7 +51,6 @@ train_df = df.sample(frac=0.8, random_state=42).reset_index(drop=True)
 val_df = df.drop(train_df.index).reset_index(drop=True)
 print(f"Train samples: {len(train_df)} | Val samples: {len(val_df)}")
 
-# ====================== MODELS ======================
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -80,7 +78,6 @@ class DomURLBERT(nn.Module):
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# Message Passing (2 rounds)
 class MessagePassing(nn.Module):
     def __init__(self):
         super().__init__()
@@ -93,7 +90,6 @@ class MessagePassing(nn.Module):
             u = self.update_u(torch.cat([u, e], dim=1))
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# Simple Concat
 class SimpleConcat(nn.Module):
     def __init__(self):
         super().__init__()
@@ -101,7 +97,7 @@ class SimpleConcat(nn.Module):
     def forward(self, e, u):
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# ====================== TRAIN BOTH MODELS ======================
+
 email_model = DistilBertWrapper().to(device)
 url_model = DomURLBERT().to(device)
 mp_model = MessagePassing().to(device)
@@ -113,7 +109,7 @@ optimizer_sc = optim.AdamW(list(email_model.parameters()) + list(url_model.param
 
 print("Training both models...")
 
-for epoch in range(12):   # Reduced for speed
+for epoch in range(12):   
     for model, optimizer in [(mp_model, optimizer_mp), (sc_model, optimizer_sc)]:
         model.train()
         for i in tqdm(range(0, len(train_df), 8), desc=f"Epoch {epoch+1}"):
@@ -129,7 +125,6 @@ for epoch in range(12):   # Reduced for speed
             loss.backward()
             optimizer.step()
 
-# ====================== EVALUATION & COLLECT PREDICTIONS ======================
 email_model.eval()
 url_model.eval()
 mp_model.eval()
@@ -154,7 +149,6 @@ with torch.no_grad():
         sc_preds.extend((sc_logit > 0.5).astype(int).flatten())
         true_labels.extend(batch['label'].values)
 
-# ====================== MCNEMAR'S TEST ======================
 mp_preds = np.array(mp_preds)
 sc_preds = np.array(sc_preds)
 true = np.array(true_labels)
@@ -178,7 +172,7 @@ print(f"McNemar statistic                      : {stat:.4f}")
 print(f"p-value                                : {p_value:.6f}")
 
 if p_value < 0.05:
-    print("✅ Statistically significant difference!")
+    print(" Statistically significant difference!")
     if b > c:
         print("→ Message Passing (2 rounds) is significantly better")
     else:
@@ -190,5 +184,3 @@ else:
 np.save("mp_predictions.npy", mp_preds)
 np.save("sc_predictions.npy", sc_preds)
 np.save("true_labels.npy", true)
-
-print("\nPredictions saved. Ready for your report.")
