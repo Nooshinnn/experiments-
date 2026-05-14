@@ -1,4 +1,4 @@
-# File: Stage2_DistilBERT_Email_DomURLBERT_OneStyle_Threshold_OneFold.py
+
 import pandas as pd
 import re
 import torch
@@ -25,7 +25,6 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== CONFIG ======================
 communication_name = "Message Passing" 
 n_folds = 1          # Changed to 1 fold as requested
 max_epochs = 30
@@ -33,7 +32,6 @@ patience = 5
 batch_size = 8
 print(f"Running Style: {communication_name} | {n_folds}-fold | Max epochs: {max_epochs}")
 
-# ====================== LOAD DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 label_col = 'labels' if 'labels' in df.columns else 'label'
@@ -60,7 +58,6 @@ def get_matching_url(label):
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
 print(f"Final samples with clean pairing: {len(df)}")
 
-# ====================== MODELS ======================
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -88,7 +85,6 @@ class DomURLBERT(nn.Module):
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== COMMUNICATION MODULES ======================
 class SimpleConcat(nn.Module):
     def __init__(self):
         super().__init__()
@@ -165,7 +161,6 @@ comm_dict = {
 }
 comm_class = comm_dict[communication_name]
 
-# ====================== METRICS FUNCTION ======================
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -186,7 +181,6 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== TRAINING LOOP (One Fold) ======================
 kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 fold_results = []
 all_y_true = []
@@ -249,7 +243,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             print(f" Early stopping at epoch {epoch+1}")
             break
 
-    # ====================== EVALUATION ======================
+
     email_model.eval()
     url_model.eval()
     if comm_model: comm_model.eval()
@@ -285,13 +279,12 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     torch.cuda.empty_cache()
     gc.collect()
 
-# ====================== FINAL RESULTS ======================
+
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\n=== {communication_name} Final Results (1-fold) ===")
 for k, v in avg_metrics.items():
     print(f" {k.replace('_', ' ').title()}: {v:.4f}")
 
-# ====================== THRESHOLD OPTIMISATION ======================
 print("\n" + "="*80)
 print("THRESHOLD OPTIMISATION ANALYSIS")
 print("="*80)
@@ -320,9 +313,6 @@ for thresh in thresholds:
         best_thresh = thresh
 
 print(f"\nBest Threshold (by F1): {best_thresh:.2f} | F1: {best_f1:.4f}")
-
-# ====================== PLOTS ======================
 thresholds_list = np.arange(0.05, 0.96, 0.05)
-# (You can add plots here if needed, but keeping minimal as per your request)
 
-print("\nThreshold analysis completed.")
+
