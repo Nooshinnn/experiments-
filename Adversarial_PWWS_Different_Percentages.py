@@ -1,4 +1,4 @@
-# File: Adversarial_PWWS_Different_Percentages.py
+
 import pandas as pd
 import re
 import torch
@@ -21,7 +21,6 @@ print("ADVERSARIAL ATTACK: PWWS (Probability Weighted Word Saliency)")
 print("Using your saved best model: my_best_model.pth")
 print("="*90)
 
-# ====================== LOAD SAVED MODEL ======================
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -59,7 +58,7 @@ class MessagePassing(nn.Module):
             u = self.update_u(torch.cat([u, e], dim=1))
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# Load your best model
+
 checkpoint = torch.load("my_best_model.pth", map_location=device)
 email_model = DistilBertWrapper().to(device)
 url_model = DomURLBERT().to(device)
@@ -73,9 +72,7 @@ email_model.eval()
 url_model.eval()
 comm_model.eval()
 
-print("✅ Best model loaded successfully.")
 
-# ====================== DATASET ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -102,7 +99,6 @@ df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_mat
 _, test_df = train_test_split(df, test_size=0.2, stratify=df['label'], random_state=42)
 test_df = test_df.reset_index(drop=True)
 
-# ====================== PWWS ATTACK ======================
 mlm_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 mlm_model = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased").to(device)
 
@@ -142,7 +138,7 @@ def pwws_attack(text, change_percent=0.30):
         
         saliency.append(abs(original_prob - new_prob))  # higher = more important
     
-    # Attack most salient words first
+
     indices = np.argsort(saliency)[::-1][:num_changes]
     
     for idx in indices:
@@ -165,7 +161,6 @@ def pwws_attack(text, change_percent=0.30):
                 break
     return " ".join(words)
 
-# ====================== EVALUATION FUNCTION ======================
 def evaluate(use_adv=False):
     y_true, y_prob = [], []
     col = 'adv_email' if use_adv else 'email_text'
@@ -187,7 +182,6 @@ def evaluate(use_adv=False):
         "mcc": matthews_corrcoef(y_true, y_pred)
     }
 
-# ====================== RUN PWWS WITH DIFFERENT PERCENTAGES ======================
 percentages = [0.10, 0.20, 0.30, 0.40, 0.50]
 
 print("\nRunning PWWS attacks...\n")
@@ -202,4 +196,3 @@ for percent in percentages:
     adv = evaluate(use_adv=True)
     print(f"   F1: {adv['f1']:.4f} | Drop: {clean['f1'] - adv['f1']:.4f}")
 
-print("\nPWWS attack experiment completed.")
