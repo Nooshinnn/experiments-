@@ -1,4 +1,4 @@
-# File: PPO_vs_Original_Single_Run_Comparison.py
+
 import pandas as pd
 import re
 import torch
@@ -22,7 +22,6 @@ print("SINGLE RUN COMPARISON")
 print("Original Message Passing (2 rounds) vs PPO Dynamic Weighting")
 print("="*80)
 
-# ====================== DATASET ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -56,7 +55,7 @@ print(f"Train samples: {len(train_df)} | Test samples: {len(test_df)}")
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== MODELS ======================
+
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -121,7 +120,6 @@ class PPOMP(nn.Module):
         comm = torch.cat([e, fused], dim=1)
         return self.fc(comm).squeeze(-1)
 
-# ====================== TRAINING FUNCTION ======================
 def train_and_evaluate(ModelClass, name):
     print(f"\nTraining {name}...")
     email_model = DistilBertWrapper().to(device)
@@ -150,7 +148,7 @@ def train_and_evaluate(ModelClass, name):
             loss.backward()
             optimizer.step()
 
-    # Evaluation
+
     comm_model.eval()
     y_true, y_prob = [], []
     with torch.no_grad():
@@ -173,8 +171,6 @@ def train_and_evaluate(ModelClass, name):
     print(f"{name} → Accuracy: {acc:.4f} | F1: {f1:.4f} | MCC: {mcc:.4f}")
     return f1, acc, mcc
 
-# ====================== RUN COMPARISON ======================
-print("\nStarting comparison...\n")
 
 original_f1, original_acc, original_mcc = train_and_evaluate(OriginalMP, "Original Message Passing (2 rounds)")
 ppo_f1, ppo_acc, ppo_mcc = train_and_evaluate(PPOMP, "PPO Dynamic Weighting")
