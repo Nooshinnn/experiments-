@@ -21,7 +21,6 @@ print("Using your best baseline model")
 print("=" * 100)
 
 
-# ====================== YOUR STRONG BASELINE ======================
 class DistilBertEmail(nn.Module):
     def __init__(self):
         super().__init__()
@@ -85,16 +84,12 @@ email_model.load_state_dict(checkpoint['email_model'])
 url_model.load_state_dict(checkpoint['url_model'])
 comm_model.load_state_dict(checkpoint['comm_model'])
 
-# Freeze discriminator parameters — but keep requires_grad=True on
-# the embedding matrix so soft embedding matmul can backprop through it.
+
 for name, p in list(email_model.named_parameters()) + \
                list(url_model.named_parameters()) + \
                list(comm_model.named_parameters()):
     p.requires_grad = False
 
-# UN-freeze just the word embedding weights of the email discriminator so that
-# the matmul in forward_soft produces a grad_fn. The weights themselves won't
-# move (optimizer only covers generator params) but autograd needs this path.
 email_model.model.embeddings.word_embeddings.weight.requires_grad = True
 
 email_model.eval()
@@ -102,11 +97,9 @@ url_model.eval()
 comm_model.eval()
 print("✅ Strong baseline loaded and frozen (embedding path kept for soft backprop).")
 
-# ====================== TOKENIZERS ======================
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== DATA ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset).rename(columns={"content": "email_text", "labels": "label"})
 df = df[df['label'].isin([0, 1])].reset_index(drop=True)
@@ -124,7 +117,6 @@ _, test_df = train_test_split(df, test_size=0.15, stratify=df['label'], random_s
 test_df = test_df.reset_index(drop=True)
 
 
-# ====================== GENERATOR ======================
 class PDGAN_Generator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -209,4 +201,4 @@ for epoch in range(20):
     print(f"Epoch {epoch + 1} | G Loss: {avg_loss:.4f}")
 
 torch.save(generator.state_dict(), "strong_pdgan_generator.pth")
-print("\n✅ PDGAN Training Completed!")
+
