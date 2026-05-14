@@ -1,4 +1,4 @@
-# File: 29_Final_Hyperparameter_Optimization_and_Retrain_PSO_Optuna.py
+
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -23,7 +23,6 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== LOAD DATA ======================
 print("Loading dataset...")
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
@@ -61,7 +60,6 @@ email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
 
-# ====================== MODEL ======================
 class EmailAgent(nn.Module):
     def __init__(self, dropout=0.3):
         super().__init__()
@@ -103,8 +101,6 @@ class MessagePassing(nn.Module):
             e, u = e_new, u_new
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-
-# ====================== TRAINING FUNCTION ======================
 def train_with_params(params, df_use, n_folds=5, max_epochs=30, patience=5, batch_size=8, save_model=False):
     fold_f1 = []
     best_model_state = None
@@ -223,7 +219,6 @@ def train_with_params(params, df_use, n_folds=5, max_epochs=30, patience=5, batc
     return mean_f1
 
 
-# ====================== OPTIMIZATION ======================
 print("=== Starting Hyperparameter Optimization (Optuna + PSO) ===")
 
 
@@ -269,7 +264,6 @@ print(f"Best PSO Params: {pso_params} (Score: {pso_score:.4f})")
 final_params = optuna_params if optuna_score > pso_score else pso_params
 print(f"\nSelected Best Parameters: {final_params}")
 
-# ====================== FINAL RETRAIN ======================
 print("\n=== Final Full Retraining with Best Parameters (5-Fold) ===")
 final_f1 = train_with_params(
     final_params,
