@@ -1,4 +1,4 @@
-# File: Adversarial_TextBugger_Different_Percentages.py
+
 import pandas as pd
 import re
 import torch
@@ -22,7 +22,7 @@ print("ADVERSARIAL ATTACK: TextBugger")
 print("Using your saved best model: my_best_model.pth")
 print("="*90)
 
-# ====================== LOAD SAVED MODEL ======================
+
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -60,7 +60,7 @@ class MessagePassing(nn.Module):
             u = self.update_u(torch.cat([u, e], dim=1))
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# Load your best model
+
 checkpoint = torch.load("my_best_model.pth", map_location=device)
 email_model = DistilBertWrapper().to(device)
 url_model = DomURLBERT().to(device)
@@ -74,9 +74,8 @@ email_model.eval()
 url_model.eval()
 comm_model.eval()
 
-print("✅ Best model loaded successfully.")
 
-# ====================== DATASET ======================
+
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -88,7 +87,7 @@ def extract_first_url(text):
 
 df['url'] = df['email_text'].apply(extract_first_url)
 
-# Clean pairing
+
 phishing_urls = df[df['label'] == 1]['url'].dropna().tolist()
 legit_urls = df[df['label'] == 0]['url'].dropna().tolist()
 random.seed(42)
@@ -103,7 +102,6 @@ df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_mat
 _, test_df = train_test_split(df, test_size=0.2, stratify=df['label'], random_state=42)
 test_df = test_df.reset_index(drop=True)
 
-# ====================== TEXTBUGGER ATTACK ======================
 def textbugger_attack(text, change_percent=0.30):
     words = text.split()
     if len(words) < 5:
@@ -138,7 +136,7 @@ def textbugger_attack(text, change_percent=0.30):
     
     return " ".join(words)
 
-# ====================== EVALUATION ======================
+
 def evaluate(use_adv=False):
     y_true, y_prob = [], []
     col = 'adv_email' if use_adv else 'email_text'
@@ -160,7 +158,6 @@ def evaluate(use_adv=False):
         "mcc": matthews_corrcoef(y_true, y_pred)
     }
 
-# ====================== RUN TEXTBUGGER WITH DIFFERENT PERCENTAGES ======================
 percentages = [0.10, 0.20, 0.30, 0.40, 0.50]
 
 print("\nRunning TextBugger attacks...\n")
@@ -175,4 +172,3 @@ for percent in percentages:
     adv = evaluate(use_adv=True)
     print(f"   F1: {adv['f1']:.4f} | F1 Drop: {clean['f1'] - adv['f1']:.4f} | Acc Drop: {clean['accuracy'] - adv['accuracy']:.4f}")
 
-print("\nTextBugger attack experiment completed.")
