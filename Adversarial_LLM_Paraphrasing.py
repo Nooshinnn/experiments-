@@ -1,4 +1,4 @@
-# File: 30_Adversarial_Hardening_Strongest_Prompt_Full.py
+
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -28,7 +28,6 @@ print(f"Device: {device}")
 print("=" * 100)
 
 
-# ====================== MODELS ======================
 class DistilBertEmail(nn.Module):
     def __init__(self, dropout=0.3):
         super().__init__()
@@ -66,7 +65,6 @@ class MessagePassing(nn.Module):
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
 
-# ====================== LOAD MODEL ======================
 print("\nLoading best_trained_model.pth ...")
 checkpoint = torch.load("best_trained_model.pth", map_location=device)
 
@@ -83,7 +81,7 @@ url_model.eval()
 comm_model.eval()
 print("✅ Model loaded successfully!")
 
-# ====================== DATASET ======================
+
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df.rename(columns={"content": "email_text", "labels": "label"})
@@ -104,7 +102,6 @@ test_df = test_df.reset_index(drop=True)
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== STRONGEST PROMPT ======================
 print("\nLoading FLAN-T5-Large...")
 paraphraser = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-large").to(device)
 para_tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-large")
@@ -135,7 +132,6 @@ def strongest_paraphrase(text):
     return para_tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 
-# ====================== EVALUATION ======================
 def evaluate(df_eval, use_adv=False, batch_size=8):
     y_true = []
     y_prob = []
@@ -170,14 +166,13 @@ def evaluate(df_eval, use_adv=False, batch_size=8):
     }
 
 
-# ====================== STAGE 1: CLEAN ======================
-print("\n=== STAGE 1: CLEAN BASELINE ===")
+
+
 clean_metrics = evaluate(test_df, use_adv=False)
 for k, v in clean_metrics.items():
     print(f"{k.replace('_', ' ').title()}: {v:.4f}")
 
-# ====================== STAGE 2: STRONGEST ATTACK ======================
-print("\n=== STAGE 2: STRONGEST PROMPT ATTACK ===")
+
 test_adv = test_df.copy()
 adv_emails = [strongest_paraphrase(text) for text in tqdm(test_adv["email_text"], desc="Strongest Attack")]
 test_adv["adv_email"] = adv_emails
@@ -187,9 +182,9 @@ adv_before = evaluate(test_adv, use_adv=True)
 print(f"\nAfter Strongest Attack → Accuracy: {adv_before['accuracy']:.4f} | F1: {adv_before['f1']:.4f}")
 print(f"F1 Drop: {clean_metrics['f1'] - adv_before['f1']:.4f}")
 
-# ====================== STAGE 3: ADVERSARIAL HARDENING ======================
+
 print("\n=== STAGE 3: ADVERSARIAL HARDENING ===")
-# Fixed concat with ignore_index + reset_index
+
 hardening_df = pd.concat([
     train_df[['email_text', 'label', 'url']].assign(source='original'),
     test_adv[['adv_email', 'label', 'url']].rename(columns={'adv_email': 'email_text'}).assign(source='adversarial')
@@ -228,7 +223,7 @@ for epoch in range(6):
         total_loss += loss.item()
     print(f"Epoch {epoch + 1} - Avg Loss: {total_loss / (len(hardening_df) // 6 + 1):.4f}")
 
-# Save hardened model
+
 save_dir = "hardened_strongest_prompt_model"
 os.makedirs(save_dir, exist_ok=True)
 torch.save(email_model.state_dict(), f"{save_dir}/email_model.pth")
@@ -236,8 +231,7 @@ torch.save(url_model.state_dict(), f"{save_dir}/url_model.pth")
 torch.save(comm_model.state_dict(), f"{save_dir}/comm_model.pth")
 print(f"Hardened model saved to: {save_dir}/")
 
-# ====================== STAGE 4: FINAL EVALUATION ======================
-print("\n=== STAGE 4: AFTER HARDENING ===")
+
 adv_after = evaluate(test_adv, use_adv=True)
 
 print(f"Clean          : Acc {clean_metrics['accuracy']:.4f} | F1 {clean_metrics['f1']:.4f}")
@@ -252,4 +246,3 @@ summary = pd.DataFrame({
 })
 summary.to_csv("strongest_prompt_hardening_summary.csv", index=False)
 
-print("\n=== EXPERIMENT COMPLETED ===")
