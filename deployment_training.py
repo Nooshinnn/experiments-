@@ -32,7 +32,6 @@ random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== PLOT CONFIG ======================
 PLOT_DIR = "plots_final_emails_urls"
 os.makedirs(PLOT_DIR, exist_ok=True)
 
@@ -52,7 +51,6 @@ plt.rcParams.update({
     "axes.labelsize": 11,
 })
 
-# ====================== LOAD DATASETS ======================
 print("Loading final_emails.csv ...")
 email_df = pd.read_csv("final_emails.csv")
 email_df['email_text'] = email_df.apply(
@@ -71,7 +69,7 @@ url_df = url_df[url_df['label'].isin([0, 1])].reset_index(drop=True)
 print(f"Email Dataset : {len(email_df)} samples")
 print(f"URL Dataset   : {len(url_df)} samples")
 
-# ---- Plot 1: Dataset Class Distribution ----
+
 def plot_dataset_distributions(email_df, url_df):
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     for ax, df, title in zip(axes, [email_df, url_df], ["Email Dataset", "URL Dataset"]):
@@ -96,7 +94,7 @@ def plot_dataset_distributions(email_df, url_df):
 
 plot_dataset_distributions(email_df, url_df)
 
-# ====================== SPLIT ======================
+
 min_size = min(len(email_df), len(url_df))
 email_sample = email_df.sample(n=min_size, random_state=42).reset_index(drop=True)
 url_sample   = url_df.sample(n=min_size, random_state=42).reset_index(drop=True)
@@ -117,7 +115,7 @@ print(f"Test size      : {len(test_df)}")
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer   = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== MODEL ======================
+
 class EmailAgent(nn.Module):
     def __init__(self, dropout=0.3):
         super().__init__()
@@ -158,7 +156,7 @@ class MessagePassing(nn.Module):
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
 
-# ====================== EXTENDED METRICS ======================
+
 def compute_all_metrics(y_true, y_pred, y_prob, split=""):
     """Returns a dict of 20 metrics."""
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
@@ -205,7 +203,7 @@ def compute_all_metrics(y_true, y_pred, y_prob, split=""):
     return metrics
 
 
-# ====================== TRAINING ======================
+
 def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size=8):
     email_model = EmailAgent().to(device)
     url_model   = URLAgent().to(device)
@@ -233,7 +231,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
     best_model_state = None
 
     for epoch in range(max_epochs):
-        # ---- Train ----
+   
         email_model.train(); url_model.train(); comm_model.train()
         tr_loss = 0.0
         tr_true, tr_pred, tr_prob = [], [], []
@@ -273,7 +271,6 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
 
         avg_tr_loss = tr_loss / (len(train_df) // batch_size + 1)
 
-        # ---- Validate ----
         email_model.eval(); url_model.eval(); comm_model.eval()
         vl_loss = 0.0
         vl_true, vl_pred, vl_prob = [], [], []
@@ -304,7 +301,6 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
 
         avg_vl_loss = vl_loss / (len(val_df) // batch_size + 1)
 
-        # ---- Record epoch history ----
         history["train_loss"].append(avg_tr_loss)
         history["val_loss"].append(avg_vl_loss)
         history["train_acc"].append(accuracy_score(tr_true, tr_pred))
@@ -320,7 +316,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
               f"Train Loss: {avg_tr_loss:.4f}  Acc: {history['train_acc'][-1]:.4f} | "
               f"Val Loss: {avg_vl_loss:.4f}  Acc: {history['val_acc'][-1]:.4f}")
 
-        # Early stopping
+        
         if avg_vl_loss < best_val_loss:
             best_val_loss = avg_vl_loss
             patience_counter = 0
@@ -340,7 +336,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
     url_model.load_state_dict({k: v.to(device) for k, v in best_model_state['url_model'].items()})
     comm_model.load_state_dict({k: v.to(device) for k, v in best_model_state['comm_model'].items()})
 
-    # ====================== FINAL EVALUATION ======================
+
     email_model.eval(); url_model.eval(); comm_model.eval()
 
     def evaluate(df_eval):
@@ -372,10 +368,10 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
     val_metrics   = compute_all_metrics(vl_true, vl_pred, vl_prob, split="Validation")
     test_metrics  = compute_all_metrics(te_true, te_pred, te_prob, split="Test")
 
-    # ====================== ALL PLOTS ======================
+
     epochs_ran = list(range(1, len(history["train_loss"]) + 1))
 
-    # ---- Plot 2: Train / Val Loss ----
+  
     def plot_loss_curve():
         fig, ax = plt.subplots(figsize=(8, 4.5))
         ax.plot(epochs_ran, history["train_loss"], color=PALETTE["train"],
@@ -392,7 +388,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 02_loss_curve.png")
 
-    # ---- Plot 3: Four-panel per-epoch metrics ----
+
     def plot_epoch_metrics():
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         specs = [
@@ -416,7 +412,6 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 03_epoch_metrics.png")
 
-    # ---- Plot 4: Confusion Matrices (3 splits side-by-side) ----
     def plot_confusion_matrices():
         fig, axes = plt.subplots(1, 3, figsize=(13, 4))
         sets = [
@@ -443,7 +438,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 04_confusion_matrices.png")
 
-    # ---- Plot 5: ROC Curves ----
+
     def plot_roc_curves():
         fig, ax = plt.subplots(figsize=(7, 6))
         for label, yt, yp, color in [
@@ -464,7 +459,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 05_roc_curves.png")
 
-    # ---- Plot 6: Precision-Recall Curves ----
+
     def plot_pr_curves():
         fig, ax = plt.subplots(figsize=(7, 6))
         for label, yt, yp, color in [
@@ -487,7 +482,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 06_pr_curves.png")
 
-    # ---- Plot 7: Predicted Probability Distributions ----
+
     def plot_score_distributions():
         fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=False)
         for ax, (name, yt, yp) in zip(axes, [
@@ -511,7 +506,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 07_score_distributions.png")
 
-    # ---- Plot 8: Threshold Sweep (F1, MCC, Precision, Recall) on Test Set ----
+
     def plot_threshold_sweep():
         thresholds = np.linspace(0.01, 0.99, 200)
         metrics_sweep = {"F1": [], "MCC": [], "Precision": [], "Recall": []}
@@ -547,7 +542,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         # Return best thresholds for optional use
         return float(thresholds[best_f1_idx]), float(thresholds[best_mcc_idx])
 
-    # ---- Plot 9: Calibration Curve ----
+-
     def plot_calibration():
         fig, ax = plt.subplots(figsize=(6, 5.5))
         ax.plot([0, 1], [0, 1], 'k--', lw=1.2, label="Perfect Calibration")
@@ -568,7 +563,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 09_calibration_curve.png")
 
-    # ---- Plot 10: Metrics Summary Heatmap ----
+
     def plot_metrics_heatmap():
         display_metrics = [
             "Accuracy", "Precision", "Recall (Sens.)", "Specificity",
@@ -594,7 +589,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         plt.close()
         print("  Saved: 10_metrics_heatmap.png")
 
-    # ---- Plot 11: Bar Chart — All Test Metrics ----
+
     def plot_test_bar():
         display_metrics = [
             "Accuracy", "Precision", "Recall (Sens.)", "Specificity",
@@ -634,7 +629,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
     plot_metrics_heatmap()
     plot_test_bar()
 
-    # ====================== SAVE METRICS JSON ======================
+
     all_results = {
         "train":      {k: (float(v) if isinstance(v, (float, np.floating)) else int(v))
                        for k, v in train_metrics.items()},
@@ -650,7 +645,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
         json.dump(all_results, f, indent=2)
     print(f"  Saved: metrics_summary.json")
 
-    # ====================== SAVE CLASSIFICATION REPORTS ======================
+
     with open(f"{PLOT_DIR}/classification_reports.txt", "w") as f:
         for name, yt, yp in [("Train", tr_true, tr_pred),
                                ("Validation", vl_true, vl_pred),
@@ -666,7 +661,7 @@ def train_model(train_df, val_df, test_df, max_epochs=50, patience=5, batch_size
     return email_model, url_model, comm_model, test_metrics
 
 
-# ====================== RUN ======================
+
 print("\nStarting training on final_emails + final_urls...")
 email_model, url_model, comm_model, test_metrics = train_model(
     train_df=train_df,
@@ -677,7 +672,7 @@ email_model, url_model, comm_model, test_metrics = train_model(
     batch_size=8
 )
 
-# ====================== SAVE MODEL ======================
+
 save_dir = "retrained_final_emails_urls_model"
 os.makedirs(save_dir, exist_ok=True)
 torch.save(email_model.state_dict(), f"{save_dir}/email_model.pth")
