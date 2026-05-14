@@ -22,10 +22,6 @@ print("ADVERSARIAL ATTACK: BAE (BERT-based Adversarial Examples)")
 print("Using your strong baseline (best_trained_model.pth)")
 print("=" * 90)
 
-
-# ====================== STRONG BASELINE MODEL — matches PDGAN/URLGAN/PWWS exactly ======================
-# FIXED: DistilBertWrapper (768->128, dropout 0.3) replaced with DistilBertEmail (768->192->128, dropout 0.5)
-# FIXED: DomURLBERT and MessagePassing dropout 0.3 -> 0.5
 class DistilBertEmail(nn.Module):
     def __init__(self):
         super().__init__()
@@ -75,7 +71,6 @@ class MessagePassing(nn.Module):
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
 
-# FIXED: checkpoint name matches the strong baseline
 checkpoint = torch.load("best_trained_model.pth", map_location=device)
 email_model = DistilBertEmail().to(device)
 url_model = DomURLBERT().to(device)
@@ -88,16 +83,11 @@ comm_model.load_state_dict(checkpoint['comm_model'])
 email_model.eval()
 url_model.eval()
 comm_model.eval()
-print("✅ Strong baseline loaded successfully.")
 
-# ====================== TOKENIZERS ======================
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== DATASET — identical to URLGAN/PWWS pipeline ======================
-# FIXED: rename first, then filter
-# FIXED: drop empty URL rows (no synthetic injection)
-# FIXED: test_size=0.15
+
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset).rename(columns={"content": "email_text", "labels": "label"})
 df = df[df['label'].isin([0, 1])].reset_index(drop=True)
@@ -115,13 +105,11 @@ _, test_df = train_test_split(df, test_size=0.15, stratify=df['label'], random_s
 test_df = test_df.reset_index(drop=True)
 print(f"Test set size: {len(test_df)}")
 
-# ====================== MLM FOR BAE ======================
 mlm_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 mlm_model = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased").to(device)
 mlm_model.eval()
 
 
-# ====================== BAE ATTACK ======================
 def bae_attack(text, url, change_percent=0.30):
     """
     FIXED: accepts real URL so the discriminator's URL branch sees the correct
@@ -199,8 +187,6 @@ def bae_attack(text, url, change_percent=0.30):
 
     return " ".join(words)
 
-
-# ====================== EVALUATION ======================
 def evaluate(df_eval, use_adv=False):
     y_true, y_prob = [], []
     col = 'adv_email' if use_adv else 'email_text'
@@ -228,8 +214,6 @@ def evaluate(df_eval, use_adv=False):
         "mcc": matthews_corrcoef(y_true, y_pred)
     }
 
-
-# ====================== RUN BAE WITH DIFFERENT PERCENTAGES ======================
 percentages = [0.10, 0.20, 0.30, 0.40, 0.50]
 
 print("\nRunning BAE attacks with different change percentages...\n")
@@ -251,4 +235,3 @@ for percent in percentages:
         f"MCC: {adv['mcc']:.4f}"
     )
 
-print("\nBAE attack experiment completed.")
