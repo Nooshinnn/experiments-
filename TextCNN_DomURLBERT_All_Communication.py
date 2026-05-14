@@ -1,4 +1,4 @@
-# File: Stage2_OneStyle_TextCNN_DomURLBERT.py
+
 import pandas as pd
 import re
 import torch
@@ -24,8 +24,7 @@ np.random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== CONFIG - CHANGE ONLY THIS ======================
-communication_name = "Cross Attention"   # <<< CHANGE THIS LINE ONLY >>>
+communication_name = "Cross Attention" 
 # Valid options:
 # "No Communication", "Simple Concat", "Weighted Score", "Gated Fusion",
 # "Cross Attention", "Message Passing"
@@ -37,7 +36,6 @@ batch_size = 8
 
 print(f"Running Style: {communication_name} | {n_folds}-fold | Max epochs: {max_epochs}")
 
-# ====================== LOAD DATASET & CLEAN PAIRING ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 
@@ -66,9 +64,7 @@ def get_matching_url(label):
 
 df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_matching_url(row['label']), axis=1)
 
-print(f"Final samples with clean pairing: {len(df)}")
 
-# ====================== MODELS ======================
 class TextCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -98,7 +94,6 @@ class DomURLBERT(nn.Module):
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== COMMUNICATION MODULES ======================
 class SimpleConcat(nn.Module):
     def __init__(self):
         super().__init__()
@@ -166,7 +161,6 @@ class NoCommunication:
         u_score = torch.sigmoid(torch.mean(u_feat, dim=1))
         return (e_score + u_score) / 2.0
 
-# ====================== SELECT COMMUNICATION MODULE ======================
 comm_dict = {
     "No Communication": None,
     "Simple Concat": SimpleConcat,
@@ -178,7 +172,6 @@ comm_dict = {
 
 comm_class = comm_dict[communication_name]
 
-# ====================== METRICS FUNCTION ======================
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -199,7 +192,6 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== TRAINING LOOP ======================
 kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 fold_results = []
 
@@ -277,7 +269,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             print(f"    Early stopping at epoch {epoch+1}")
             break
 
-    # ====================== EVALUATION ======================
     email_model.eval()
     url_model.eval()
     if comm_model: comm_model.eval()
@@ -320,7 +311,6 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
     torch.cuda.empty_cache()
     gc.collect()
 
-# ====================== FINAL RESULTS ======================
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\n=== {communication_name} Final Results ({n_folds}-fold) ===")
 for k, v in avg_metrics.items():
@@ -328,4 +318,3 @@ for k, v in avg_metrics.items():
 
 result_df = pd.DataFrame([avg_metrics])
 result_df.to_csv(f"Stage2_{communication_name.replace(' ', '_')}_results.csv", index=False)
-print(f"\nResults saved to Stage2_{communication_name.replace(' ', '_')}_results.csv")
