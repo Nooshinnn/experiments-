@@ -24,7 +24,6 @@ print("Using your strong baseline (best_trained_model.pth)")
 print("=" * 90)
 
 
-# ====================== CORRECT STRONG BASELINE MODEL ======================
 class DistilBertEmail(nn.Module):
     def __init__(self):
         super().__init__()
@@ -87,10 +86,8 @@ comm_model.load_state_dict(checkpoint['comm_model'])
 email_model.eval()
 url_model.eval()
 comm_model.eval()
-print("✅ Strong baseline loaded successfully.")
 
-# ====================== DATASET — IDENTICAL TO PDGAN PIPELINE ======================
-# FIXED: column rename order, empty URL removal, test_size all match PDGAN exactly
+
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset).rename(columns={"content": "email_text", "labels": "label"})  # rename first
 df = df[df['label'].isin([0, 1])].reset_index(drop=True)
@@ -106,7 +103,7 @@ df['url'] = df['email_text'].apply(extract_first_url)
 # FIXED: drop rows with no URL — same as PDGAN (no synthetic URL injection)
 df = df[df['url'] != ""].reset_index(drop=True)
 
-# FIXED: test_size=0.15 to match PDGAN exactly
+
 _, test_df = train_test_split(df, test_size=0.15, stratify=df['label'], random_state=42)
 test_df = test_df.reset_index(drop=True)
 
@@ -114,7 +111,6 @@ email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
 
-# ====================== URLGAN ATTACK ======================
 def urlgan_attack(url, strength=0.3):
     if not url or len(url) < 10:
         return url
@@ -143,7 +139,6 @@ def urlgan_attack(url, strength=0.3):
     return ''.join(url_list)
 
 
-# ====================== EVALUATION ======================
 def evaluate(df_eval, use_adv=False):
     y_true, y_prob = [], []
     col_url = 'adv_url' if use_adv else 'url'
@@ -172,7 +167,6 @@ def evaluate(df_eval, use_adv=False):
     }
 
 
-# ====================== RUN EXPERIMENT ======================
 strengths = [0.1, 0.2, 0.3, 0.4, 0.5]
 print("\nRunning URLGAN attacks...\n")
 
@@ -196,4 +190,3 @@ for strength in strengths:
         f"MCC: {adv['mcc']:.4f}"
     )
 
-print("\nURLGAN experiment completed.")
