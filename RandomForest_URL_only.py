@@ -1,4 +1,4 @@
-# File: 12_RandomForest_URL_only.py
+
 import pandas as pd
 import re
 import numpy as np
@@ -21,8 +21,7 @@ print("="*80)
 print("RandomForest (URL-only) - 10-Fold CV with Early Stopping")
 print("="*80)
 
-# ====================== LOAD LARGE DATASET ======================
-print("\nLoading large training dataset...")
+
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 
@@ -32,7 +31,7 @@ df = df.rename(columns={label_col: "label", "content": "email_text"})
 
 print(f"Training email samples: {len(df)}")
 
-# ====================== CREATE EMAIL-URL PAIRS ======================
+
 def extract_first_url(text):
     urls = re.findall(r'https?://\S+', str(text))
     return urls[0] if urls else None
@@ -56,7 +55,7 @@ df['url'] = df.apply(lambda row: row['url'] if pd.notna(row['url']) else get_syn
 
 print(f"Final paired samples: {len(df)}")
 
-# ====================== LEXICAL FEATURES ======================
+
 def extract_hannousse_style_url_features(url):
     if not isinstance(url, str) or not url.strip():
         return {f: 0.0 for f in ['length_url','length_hostname','ip','nb_dots','nb_hyphens','nb_at','nb_qm',
@@ -113,7 +112,7 @@ url_features_df = pd.DataFrame([extract_hannousse_style_url_features(u) for u in
 X = url_features_df.values.astype(np.float32)
 y = df['label'].values
 
-# ====================== ALL METRICS ======================
+
 def compute_all_metrics(y_true, y_pred, y_prob=None):
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
@@ -134,7 +133,7 @@ def compute_all_metrics(y_true, y_pred, y_prob=None):
         metrics["log_loss"] = log_loss(y_true, y_prob)
     return metrics
 
-# ====================== 10-FOLD TRAINING WITH EARLY STOPPING ======================
+
 kf = KFold(n_splits=10, shuffle=True, random_state=42)
 fold_results = []
 
@@ -192,7 +191,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
 
     gc.collect()
 
-# ====================== FINAL RESULTS ======================
+
 avg_metrics = {k: np.mean([f[k] for f in fold_results]) for k in fold_results[0]}
 print(f"\nFinal Average for RandomForest (URL-only):")
 for k, v in avg_metrics.items():
