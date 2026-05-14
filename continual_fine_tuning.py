@@ -33,7 +33,6 @@ random.seed(42)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ====================== PLOT CONFIG ======================
 PLOT_DIR = "plots_continual_finetuning"
 os.makedirs(PLOT_DIR, exist_ok=True)
 
@@ -63,7 +62,6 @@ print("CONTINUAL FINE-TUNING + COMPARISON")
 print("Old Model (cybersectony) vs New Fine-tuned Model")
 print("=" * 100)
 
-# ====================== MODEL DEFINITIONS ======================
 class DistilBertEmail(nn.Module):
     def __init__(self, dropout=0.3):
         super().__init__()
@@ -102,9 +100,6 @@ class MessagePassing(nn.Module):
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
 
-# ====================== LOAD OLD MODEL ======================
-# ====================== LOAD OLD MODEL ======================
-print("\nLoading old best trained model from best_trained_model.pth ...")
 
 checkpoint = torch.load("best_trained_model.pth", map_location=device)
 print(f"  Checkpoint keys: {list(checkpoint.keys())}")
@@ -119,7 +114,6 @@ old_comm.load_state_dict(checkpoint['comm_model'])
 
 print("Old model loaded successfully.")
 
-# ====================== LOAD NEW DATASETS ======================
 print("\nLoading new datasets (final_emails & final_urls)...")
 email_df = pd.read_csv("final_emails.csv")
 email_df['email_text'] = email_df.apply(
@@ -163,7 +157,6 @@ def plot_dataset_overview(email_df, url_df):
 
 plot_dataset_overview(email_df, url_df)
 
-# ====================== SPLIT ======================
 min_size  = min(len(email_df), len(url_df))
 email_s   = email_df.sample(n=min_size, random_state=42).reset_index(drop=True)
 url_s     = url_df.sample(n=min_size, random_state=42).reset_index(drop=True)
@@ -178,7 +171,6 @@ train_df, temp     = train_test_split(paired, test_size=0.3, stratify=paired['la
 val_df,   new_test = train_test_split(temp,   test_size=0.5, stratify=temp['label'],   random_state=42)
 print(f"Train: {len(train_df)} | Val: {len(val_df)} | New Test: {len(new_test)}")
 
-# ====================== OLD TEST SET ======================
 print("\nLoading old test set from cybersectony dataset...")
 old_dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 old_df = pd.DataFrame(old_dataset)
@@ -199,7 +191,6 @@ print(f"Old Test Set size: {len(old_test)}")
 email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer   = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
-# ====================== EXTENDED METRICS ======================
 def compute_all_metrics(y_true, y_pred, y_prob, label=""):
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     total = tn + fp + fn + tp
@@ -263,8 +254,8 @@ def run_inference(model_e, model_u, model_c, df_eval, batch_size=8):
     return y_true, y_pred, y_prob
 
 
-# ====================== CONTINUAL FINE-TUNING ======================
-print("\nStarting Continual Fine-Tuning...")
+
+
 
 email_model = DistilBertEmail().to(device)
 url_model   = DomURLBERT().to(device)
@@ -395,12 +386,11 @@ for epoch in range(20):
             print(f"Early stopping at epoch {epoch+1}")
             break
 
-# Restore best weights
 email_model.load_state_dict({k: v.to(device) for k, v in best_state['email_model'].items()})
 url_model.load_state_dict({k: v.to(device)   for k, v in best_state['url_model'].items()})
 comm_model.load_state_dict({k: v.to(device)  for k, v in best_state['comm_model'].items()})
 
-# ====================== SAVE NEW MODEL ======================
+
 save_dir = "continual_finetuned_model"
 os.makedirs(save_dir, exist_ok=True)
 torch.save(email_model.state_dict(), f"{save_dir}/email_model.pth")
@@ -408,8 +398,7 @@ torch.save(url_model.state_dict(),   f"{save_dir}/url_model.pth")
 torch.save(comm_model.state_dict(),  f"{save_dir}/comm_model.pth")
 print(f"\nNew fine-tuned model saved to: {save_dir}/")
 
-# ====================== ALL EVALUATIONS ======================
-print("\nRunning all evaluations...")
+
 
 # New model on both test sets
 nt_new_true, nt_new_pred, nt_new_prob = run_inference(email_model, url_model, comm_model, new_test)
@@ -426,9 +415,8 @@ old_model_on_old = compute_all_metrics(ot_old_true, ot_old_pred, ot_old_prob, "O
 
 epochs_ran = list(range(1, len(history["train_loss"]) + 1))
 
-# ====================== ALL PLOTS ======================
 
-# ---- Plot 2: Loss Curve ----
+
 def plot_loss_curve():
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(epochs_ran, history["train_loss"], color=PALETTE["train"],
@@ -447,7 +435,7 @@ def plot_loss_curve():
     print("  Saved: 02_loss_curve.png")
 
 
-# ---- Plot 3: Per-epoch metrics (4-panel) ----
+
 def plot_epoch_metrics():
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     specs = [
@@ -472,7 +460,6 @@ def plot_epoch_metrics():
     print("  Saved: 03_epoch_metrics.png")
 
 
-# ---- Plot 4: Side-by-side confusion matrices (2×2 grid: model × test set) ----
 def plot_confusion_matrices():
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     combos = [
@@ -502,7 +489,6 @@ def plot_confusion_matrices():
     print("  Saved: 04_confusion_matrices.png")
 
 
-# ---- Plot 5: ROC Curves — all 4 combinations ----
 def plot_roc_curves():
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
     # Left: Old Test Set
@@ -540,7 +526,6 @@ def plot_roc_curves():
     print("  Saved: 05_roc_curves.png")
 
 
-# ---- Plot 6: Precision-Recall Curves ----
 def plot_pr_curves():
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
     for ax, test_label, combos_pr in [
@@ -572,7 +557,6 @@ def plot_pr_curves():
     print("  Saved: 06_pr_curves.png")
 
 
-# ---- Plot 7: Score Distributions (2×2: model × test set) ----
 def plot_score_distributions():
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     combos = [
@@ -599,7 +583,6 @@ def plot_score_distributions():
     print("  Saved: 07_score_distributions.png")
 
 
-# ---- Plot 8: Threshold Sweep — New Model on New Test Set ----
 def plot_threshold_sweep():
     thresholds = np.linspace(0.01, 0.99, 200)
     sweep = {"F1": [], "MCC": [], "Precision": [], "Recall": []}
@@ -633,7 +616,6 @@ def plot_threshold_sweep():
     return float(best_f1), float(best_mcc)
 
 
-# ---- Plot 9: Calibration Curves ----
 def plot_calibration():
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     for ax, test_label, combos_cal in [
@@ -661,7 +643,7 @@ def plot_calibration():
     print("  Saved: 09_calibration_curves.png")
 
 
-# ---- Plot 10: Grouped bar — Old vs New on both test sets ----
+
 def plot_grouped_comparison_bar():
     core_metrics = ["Accuracy", "Precision", "Recall (Sens.)",
                     "F1-Score", "MCC", "ROC-AUC", "Avg Precision", "Cohen's Kappa"]
@@ -698,7 +680,6 @@ def plot_grouped_comparison_bar():
     print("  Saved: 10_grouped_comparison_bar.png")
 
 
-# ---- Plot 11: Delta (improvement) heat-strip ----
 def plot_delta_heatmap():
     display_metrics = [
         "Accuracy", "Precision", "Recall (Sens.)", "Specificity",
@@ -738,7 +719,6 @@ def plot_delta_heatmap():
     print("  Saved: 11_delta_heatmap.png")
 
 
-# ---- Plot 12: Full metrics heatmap (all 4 combos) ----
 def plot_full_metrics_heatmap():
     display_metrics = [
         "Accuracy", "Precision", "Recall (Sens.)", "Specificity",
@@ -797,7 +777,7 @@ def plot_forgetting_check():
     print("  Saved: 13_forgetting_check.png")
 
 
-print("\n--- Generating plots ---")
+
 plot_loss_curve()
 plot_epoch_metrics()
 plot_confusion_matrices()
@@ -811,7 +791,6 @@ plot_delta_heatmap()
 plot_full_metrics_heatmap()
 plot_forgetting_check()
 
-# ====================== SAVE RESULTS ======================
 all_results = {
     "old_model_on_old_test": {k: (float(v) if isinstance(v, float) else int(v))
                                for k, v in old_model_on_old.items()},
@@ -829,7 +808,7 @@ with open(f"{PLOT_DIR}/metrics_summary.json", "w") as f:
     json.dump(all_results, f, indent=2)
 print("  Saved: metrics_summary.json")
 
-# Classification reports
+
 with open(f"{PLOT_DIR}/classification_reports.txt", "w") as f:
     for name, yt, yp in [
         ("Old Model → Old Test", ot_old_true, ot_old_pred),
@@ -856,5 +835,3 @@ for name, m in [
 ]:
     print(f"{name:<28} {m['Accuracy']:>10.4f} {m['F1-Score']:>10.4f} "
           f"{m['MCC']:>10.4f} {m['ROC-AUC']:>10.4f}")
-
-print(f"\n✅ All plots saved to: {PLOT_DIR}/")
