@@ -1,4 +1,4 @@
-# File: PDGAN_Attack_Evaluation_Fixed.py
+
 import pandas as pd
 import re
 import torch
@@ -24,7 +24,7 @@ print("Using your strong baseline + matching MLM Generator")
 print("=" * 90)
 
 
-# ====================== STRONG BASELINE MODEL (Correct Adapter) ======================
+
 class DistilBertEmail(nn.Module):
     def __init__(self):
         super().__init__()
@@ -84,7 +84,6 @@ comm_model.eval()
 print("✅ Strong baseline loaded successfully.")
 
 
-# ====================== MATCHING PDGAN GENERATOR (MLM-based) ======================
 class StrongPDGAN_Generator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -99,7 +98,7 @@ generator.load_state_dict(torch.load("strong_pdgan_generator.pth", map_location=
 generator.eval()
 print("✅ PDGAN Generator (MLM) loaded successfully.")
 
-# ====================== DATASET ======================
+
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset).rename(columns={"content": "email_text", "labels": "label"})
 df = df[df['label'].isin([0, 1])].reset_index(drop=True)
@@ -120,7 +119,6 @@ email_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 url_tokenizer = AutoTokenizer.from_pretrained("amahdaouy/DomURLs_BERT")
 
 
-# ====================== GENERATE ADVERSARIAL EMAILS ======================
 def generate_pdgan_adv(text):
     text = str(text)
     if len(text) < 20:
@@ -148,7 +146,6 @@ test_adv = test_df.copy()
 test_adv['adv_email'] = [generate_pdgan_adv(t) for t in tqdm(test_adv['email_text'])]
 
 
-# ====================== EVALUATION ======================
 def evaluate(df_eval, use_adv=False):
     y_true, y_prob = [], []
     col = 'adv_email' if use_adv else 'email_text'
