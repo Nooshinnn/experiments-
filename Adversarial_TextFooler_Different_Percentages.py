@@ -1,4 +1,4 @@
-# File: Adversarial_TextFooler_Different_Percentages.py
+
 import pandas as pd
 import re
 import torch
@@ -21,7 +21,7 @@ print("ADVERSARIAL ATTACK: TextFooler with Different Change Percentages")
 print("Using your saved best model: my_best_model.pth")
 print("="*90)
 
-# ====================== LOAD SAVED MODEL ======================
+
 class DistilBertWrapper(nn.Module):
     def __init__(self):
         super().__init__()
@@ -59,7 +59,7 @@ class MessagePassing(nn.Module):
             u = self.update_u(torch.cat([u, e], dim=1))
         return self.fc(torch.cat([e, u], dim=1)).squeeze(-1)
 
-# Load your best model
+
 checkpoint = torch.load("my_best_model.pth", map_location=device)
 
 email_model = DistilBertWrapper().to(device)
@@ -74,9 +74,7 @@ email_model.eval()
 url_model.eval()
 comm_model.eval()
 
-print("✅ Best model loaded successfully.")
 
-# ====================== DATASET ======================
 dataset = load_dataset("cybersectony/PhishingEmailDetectionv2.0", split="train")
 df = pd.DataFrame(dataset)
 df = df[df['labels'].isin([0, 1])].reset_index(drop=True)
@@ -105,7 +103,7 @@ from sklearn.model_selection import train_test_split
 _, test_df = train_test_split(df, test_size=0.2, stratify=df['label'], random_state=42)
 test_df = test_df.reset_index(drop=True)
 
-# ====================== TEXTFOOLER ATTACK ======================
+
 mlm_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 mlm_model = AutoModelForMaskedLM.from_pretrained("distilbert-base-uncased").to(device)
 
@@ -163,7 +161,7 @@ def evaluate(model_email, model_url, model_comm, df_eval, use_adv=False):
         "roc_auc": roc_auc_score(y_true, y_prob)
     }
 
-# ====================== RUN ATTACKS WITH DIFFERENT PERCENTAGES ======================
+
 percentages = [0.10, 0.20, 0.30, 0.40, 0.50]
 
 print("\nRunning TextFooler attacks with different change percentages...\n")
@@ -190,4 +188,3 @@ print("Change % | F1 Score | F1 Drop")
 for p, f1, _ in results:
     print(f"{p*100:6.0f}%   | {f1:.4f}   | {clean_metrics['f1'] - f1:.4f}")
 
-print(f"\nBest performing attack (least damage): {min(results, key=lambda x: clean_metrics['f1'] - x[1])[0]*100:.0f}% change")
